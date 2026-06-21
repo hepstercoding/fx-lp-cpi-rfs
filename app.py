@@ -1480,7 +1480,7 @@ def equation_text(
 
 def sidebar() -> tuple[str, Path]:
     st.sidebar.title("CPI LP Dashboard")
-    page = st.sidebar.radio("Page", ["Data", "Methodology", "Baseline LP", "Asymmetry LP", "Major Groups"], index=0)
+    page = st.sidebar.radio("Page", ["Baseline LP", "Asymmetry LP", "Major Groups", "Data", "Methodology"], index=0)
     data_path_text = st.sidebar.text_input("Data file", str(DEFAULT_DATA_PATH))
     return page, Path(data_path_text).expanduser()
 
