@@ -1,0 +1,8 @@
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+data/raw/WS_EER_csv_flat.zip
+outputs/data_overview/

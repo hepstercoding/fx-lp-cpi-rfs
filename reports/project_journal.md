@@ -1,0 +1,38 @@
+# Project Journal
+
+## 2026-06-19
+
+- Started project scaffold for CPI local projections to CHF moves.
+- Working title: `cpi-local-projections-chf`.
+- Baseline empirical target: Swiss CPI response to CHF appreciation/depreciation moves.
+- Next step: adapt or reuse the existing Swiss CPI and CHF data-fetching pipeline.
+- Added `reports/data_sources_and_plots.ipynb` to document the first data sources and plot the raw/seasonally adjusted series where available.
+- Seeded `data/raw/swiss_macro_real.csv` from the previous Swiss LP project as the initial working panel.
+- Added a first Streamlit dashboard in `app.py` with a data page for sources, coverage, plots, and panel download.
+- Polished the data page with source links, compact chart controls, raw/SA toggles, and a missingness heatmap.
+- Added Streamlit deployment configuration and `DEPLOYMENT.md`.
+- Added a self-contained data-fetching module and `scripts/fetch_data.py`.
+- Added `reports/feature_roadmap.md` to track later dashboard and LP features.
+- Added first Baseline LP dashboard page with y/y CPI responses, equation display, forward-shock toggle, and companion CHF persistence IRF.
+- Added dependent-variable transformation selector for y/y inflation, m/m inflation, and cumulative price differences.
+- Changed LP presentation so CPI results are always displayed as y/y inflation responses, with m/m and cumulative estimates converted in the display layer.
+- Added period-window presets and custom event windows to the Baseline LP page, with optional contemporaneous dummy controls and shaded sample-preview charts.
+- Added energy/fuels CPI as a Baseline LP response option.
+- Added independent display-transformation selector and confidence intervals for displayed responses, including approximate converted-response intervals.
+- Added session-level specification comparison panel for saving current LP settings and plotting multiple displayed CPI responses together.
+- Added implied REER companion path to the CHF chart, assuming foreign prices do not react.
+- Fixed implied REER calculation so it always uses the cumulative Swiss price-level response, independent of the selected CPI display transformation.
+- Added goods, services, domestic, and imported CPI indexes from SNB `plkoprart` as dashboard/LP response targets.
+- Added SA/NSA selector for the LP target index.
+- Added a positive-vs-negative CHF shock panel above the specification comparison, with the symmetric baseline IRF shown alongside the split-shock responses.
+- Added EURCHF and USDCHF to the data pipeline and a Baseline LP shock selector for NEER, EURCHF, and USDCHF; bilateral shocks use a CHF-appreciation-positive sign convention.
+- Added explicit dashboard wording that confidence intervals are 90% HAC intervals.
+- Moved appreciation/depreciation asymmetry to a dedicated page, removed forward-shock controls from that specification, and added maintained 1% CHF appreciation/depreciation responses by layering the estimated CHF path IRFs.
+- Added the maintained symmetric IRF as a black dashed reference line on the Asymmetry LP page.
+- Added SNB `plkoprgru` major grouping indexes to the data pipeline and a Major Groups page with 14 y/y subgroup IRF panels, each overlaid with a black dashed headline CPI reference IRF.
+- Added a symmetric/asymmetry mode selector to the Major Groups page; asymmetry mode uses maintained 1% appreciation/depreciation responses with no forward-shock controls.
+- Replaced the Major Groups forward-shock toggle with an FX path selector for normal estimated FX IRFs versus layered maintained 1% moves.
+- Added one-shock FX appreciation/depreciation path IRFs to the Asymmetry LP page above the one-shock CPI IRFs.
+- Replaced the Baseline LP forward-shock toggle with a three-way FX path selector: standard one-shock IRF, layered maintained 1% move, or forward-shock controls.
+- Added a Methodology dashboard page covering interpretation, LP equations, FX-path options, asymmetry, major groups, uncertainty bands, and seasonal-adjustment caveats.
+- Updated the Data page to document and plot the active dashboard inputs: headline/core CPI, CHF exchange-rate measures, controls, and all 14 SNB major groups; legacy inactive price targets are no longer shown by default.
