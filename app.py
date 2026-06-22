@@ -1390,20 +1390,41 @@ def draw_major_group_horizon_bars(
 
     plot_data["weighted_contribution"] = plot_data["beta"] * plot_data["weight_pct"] / 100
     headline_plot = headline_results.dropna(subset=["beta"]).copy()
-    horizons = [(12, "1 year"), (24, "2 years"), (36, "3 years"), ("cum36", "Cumulated 0-36 months")]
+    horizons = [(12, "1 year"), (24, "2 years"), (36, "3 years"), ("level36", "Implied price level after 36 months")]
+
+    def implied_level_at_36(frame: pd.DataFrame) -> pd.DataFrame:
+        rows = []
+        for keys, group in frame.groupby(["group_code", "group_label", "weight_pct"], sort=False):
+            by_horizon = group.set_index("horizon")["beta"].to_dict()
+            if 36 not in by_horizon:
+                continue
+            level_effect = by_horizon.get(36, 0.0) + by_horizon.get(24, 0.0) + by_horizon.get(12, 0.0)
+            group_code, group_label, weight_pct = keys
+            rows.append(
+                {
+                    "group_code": group_code,
+                    "group_label": group_label,
+                    "weight_pct": weight_pct,
+                    "beta": level_effect,
+                    "weighted_contribution": level_effect * weight_pct / 100,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def headline_level_at_36(frame: pd.DataFrame) -> float:
+        by_horizon = frame.set_index("horizon")["beta"].to_dict()
+        if 36 not in by_horizon:
+            return np.nan
+        return by_horizon.get(36, 0.0) + by_horizon.get(24, 0.0) + by_horizon.get(12, 0.0)
 
     fig, axes = plt.subplots(len(horizons), 1, figsize=(12, 19), sharex=False)
     axes = np.atleast_1d(axes).ravel()
     for ax, (horizon, label) in zip(axes, horizons):
-        if horizon == "cum36":
-            current = (
-                plot_data.loc[plot_data["horizon"].between(0, 36)]
-                .groupby(["group_code", "group_label", "weight_pct"], as_index=False)
-                .agg(beta=("beta", "sum"), weighted_contribution=("weighted_contribution", "sum"))
-            )
-            headline_value = headline_plot.loc[headline_plot["horizon"].between(0, 36), "beta"].sum()
-            x_label = "Percentage-point months"
-            title_prefix = "Cumulated through 36 months"
+        if horizon == "level36":
+            current = implied_level_at_36(plot_data)
+            headline_value = headline_level_at_36(headline_plot)
+            x_label = "Percent log points"
+            title_prefix = "Implied cumulative price-level effect after 36 months"
         else:
             current = plot_data.loc[plot_data["horizon"].eq(horizon)].copy()
             headline_at_horizon = headline_plot.loc[headline_plot["horizon"].eq(horizon), "beta"]
@@ -1448,7 +1469,7 @@ def draw_major_group_horizon_bars(
         ax.set_yticks(y)
         ax.set_yticklabels(current["bar_label"], fontsize=8)
         ax.set_title(
-            f"{title_prefix}: sorted by subgroup y/y IRF; contribution sum = {contribution_sum:.3f}",
+            f"{title_prefix}: sorted by subgroup effect; contribution sum = {contribution_sum:.3f}",
             fontsize=11,
             pad=8,
         )
@@ -2441,8 +2462,8 @@ def render_major_groups_page(data: pd.DataFrame) -> None:
     st.subheader("Horizon Ranking and Contributions")
     st.caption(
         "Bars compare each subgroup y/y IRF with its CPI-weighted contribution "
-        "(2026 BFS LIK weight times subgroup IRF). Point-in-time contributions are percentage points; "
-        "the cumulated chart sums y/y effects over months 0-36 and is in percentage-point months. "
+        "(2026 BFS LIK weight times subgroup IRF). Point-in-time contributions are percentage points. "
+        "The fourth chart shows the implied 36-month price-level effect recovered from y/y responses as h36 + h24 + h12. "
         "All contribution charts exclude the total-CPI panel."
     )
     ranking_component = None

@@ -38,5 +38,5 @@
 - Updated the Data page to document and plot the active dashboard inputs: headline/core CPI, CHF exchange-rate measures, controls, and all 14 SNB major groups; legacy inactive price targets are no longer shown by default.
 - Added 2026 BFS LIK basket weights as major-group metadata, corrected the `VF`/`SWD` labels, and displayed weights on major-group data/results panels.
 - Added Major Groups horizon-ranking bar charts for 1-, 2-, and 3-year y/y effects, with side-by-side subgroup IRFs and CPI-weighted contribution bars.
-- Added a fourth Major Groups ranking panel for the cumulative y/y IRF sum over months 0-36.
+- Added a fourth Major Groups ranking panel for the implied 36-month cumulative price-level effect derived from the y/y IRF path.
 - Moved Major Groups ranking/contribution bar charts above the detailed IRF panels and let each subgroup IRF panel use its own y-axis scale.
