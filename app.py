@@ -1271,19 +1271,6 @@ def draw_major_group_grid(group_results: pd.DataFrame, headline_results: pd.Data
     fig, axes = plt.subplots(nrows, ncols, figsize=(13, 3.0 * nrows), sharex=True)
     axes = np.atleast_1d(axes).ravel()
 
-    y_values = [plot_data["beta"], plot_data["ci_lower"], plot_data["ci_upper"]]
-    if not headline_plot.empty:
-        y_values.append(headline_plot["beta"])
-    y_all = pd.concat(y_values, ignore_index=True).replace([np.inf, -np.inf], np.nan).dropna()
-    if y_all.empty:
-        y_min, y_max = -1.0, 1.0
-    else:
-        y_min = min(float(y_all.min()), 0.0)
-        y_max = max(float(y_all.max()), 0.0)
-        padding = 0.08 * (y_max - y_min) if not np.isclose(y_max, y_min) else 0.5
-        y_min -= padding
-        y_max += padding
-
     for ax, group in zip(axes, groups):
         current = plot_data.loc[plot_data["group_code"].eq(group["code"])].sort_values("horizon")
         x = current["horizon"].to_numpy()
@@ -1310,7 +1297,6 @@ def draw_major_group_grid(group_results: pd.DataFrame, headline_results: pd.Data
         ax.grid(True, alpha=0.22)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.set_ylim(y_min, y_max)
         ax.legend(frameon=False, fontsize=7, loc="best")
 
     for ax in axes[len(groups) :]:
@@ -1337,19 +1323,6 @@ def draw_major_group_asymmetry_grid(group_results: pd.DataFrame, headline_result
     nrows = int(np.ceil(len(groups) / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(13, 3.0 * nrows), sharex=True)
     axes = np.atleast_1d(axes).ravel()
-
-    y_values = [plot_data["beta"], plot_data["ci_lower"], plot_data["ci_upper"]]
-    if not headline_plot.empty:
-        y_values.append(headline_plot["beta"])
-    y_all = pd.concat(y_values, ignore_index=True).replace([np.inf, -np.inf], np.nan).dropna()
-    if y_all.empty:
-        y_min, y_max = -1.0, 1.0
-    else:
-        y_min = min(float(y_all.min()), 0.0)
-        y_max = max(float(y_all.max()), 0.0)
-        padding = 0.08 * (y_max - y_min) if not np.isclose(y_max, y_min) else 0.5
-        y_min -= padding
-        y_max += padding
 
     colors = {
         "Maintained +1% CHF appreciation": "#0F766E",
@@ -1385,7 +1358,6 @@ def draw_major_group_asymmetry_grid(group_results: pd.DataFrame, headline_result
         ax.grid(True, alpha=0.22)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.set_ylim(y_min, y_max)
         ax.legend(frameon=False, fontsize=7, loc="best")
 
     for ax in axes[len(groups) :]:
@@ -2466,20 +2438,6 @@ def render_major_groups_page(data: pd.DataFrame) -> None:
     col_c.metric("Last month", sample["date"].max().strftime("%Y-%m"))
     col_d.metric("Panels", f"{group_results['group_code'].nunique() if not group_results.empty else 0}/14")
 
-    st.subheader("Subgroup IRFs")
-    if mode_label == "Symmetric":
-        draw_major_group_grid(
-            group_results,
-            headline_results,
-            f"SNB CPI Major Groups: y/y Inflation Response to {shock_label} ({shock_path_label})",
-        )
-    else:
-        draw_major_group_asymmetry_grid(
-            group_results,
-            headline_results,
-            f"SNB CPI Major Groups: Asymmetric y/y Responses to {shock_label} ({shock_path_label})",
-        )
-
     st.subheader("Horizon Ranking and Contributions")
     st.caption(
         "Bars compare each subgroup y/y IRF with its CPI-weighted contribution "
@@ -2493,6 +2451,21 @@ def render_major_groups_page(data: pd.DataFrame) -> None:
         if components:
             ranking_component = st.selectbox("Rank component", components, index=0)
     draw_major_group_horizon_bars(group_results, headline_results, component=ranking_component)
+
+    st.subheader("Subgroup IRFs")
+    st.caption("Each subgroup panel uses its own y-axis scale.")
+    if mode_label == "Symmetric":
+        draw_major_group_grid(
+            group_results,
+            headline_results,
+            f"SNB CPI Major Groups: y/y Inflation Response to {shock_label} ({shock_path_label})",
+        )
+    else:
+        draw_major_group_asymmetry_grid(
+            group_results,
+            headline_results,
+            f"SNB CPI Major Groups: Asymmetric y/y Responses to {shock_label} ({shock_path_label})",
+        )
 
     st.subheader("Results")
     if mode_label == "Symmetric":
