@@ -36,3 +36,6 @@
 - Replaced the Baseline LP forward-shock toggle with a three-way FX path selector: standard one-shock IRF, layered maintained 1% move, or forward-shock controls.
 - Added a Methodology dashboard page covering interpretation, LP equations, FX-path options, asymmetry, major groups, uncertainty bands, and seasonal-adjustment caveats.
 - Updated the Data page to document and plot the active dashboard inputs: headline/core CPI, CHF exchange-rate measures, controls, and all 14 SNB major groups; legacy inactive price targets are no longer shown by default.
+- Added 2026 BFS LIK basket weights as major-group metadata, corrected the `VF`/`SWD` labels, and displayed weights on major-group data/results panels.
+- Added Major Groups horizon-ranking bar charts for 1-, 2-, and 3-year y/y effects, with side-by-side subgroup IRFs and CPI-weighted contribution bars.
+- Added a fourth Major Groups ranking panel for the cumulative y/y IRF sum over months 0-36.

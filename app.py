@@ -89,23 +89,30 @@ SOURCE_ROWS = [
         "URL": "https://data.snb.ch/en/topics/uvo/cube/plkoprgru",
         "Notes": "14 major grouping indexes. Seasonally adjusted with STL in the project pipeline.",
     },
+    {
+        "Variable": "Swiss CPI major-group weights",
+        "Columns": "weight_pct metadata",
+        "Source": "Swiss Federal Statistical Office, LIK basket and weights 2026",
+        "URL": "https://www.bfs.admin.ch/bfs/de/home/statistiken/preise/erhebungen/lik/warenkorb.html",
+        "Notes": "Annual basket shares in percent. Used as metadata for the major-group dashboard panels.",
+    },
 ]
 
 MAJOR_GROUPS = [
-    {"code": "NG", "column": "major_ng", "label": "Food and non-alcoholic beverages"},
-    {"code": "AGT", "column": "major_agt", "label": "Alcoholic beverages and tobacco"},
-    {"code": "BS", "column": "major_bs", "label": "Clothing and footwear"},
-    {"code": "WE", "column": "major_we", "label": "Housing and energy"},
-    {"code": "HH", "column": "major_hh", "label": "Household goods and services"},
-    {"code": "G", "column": "major_g", "label": "Health"},
-    {"code": "V", "column": "major_v", "label": "Transport"},
-    {"code": "N", "column": "major_n", "label": "Communications"},
-    {"code": "FK", "column": "major_fk", "label": "Recreation and culture"},
-    {"code": "EU", "column": "major_eu", "label": "Education"},
-    {"code": "RH", "column": "major_rh", "label": "Restaurants and hotels"},
-    {"code": "VF", "column": "major_vf", "label": "Other goods and services"},
-    {"code": "SWD", "column": "major_swd", "label": "Social protection and financial services"},
-    {"code": "T", "column": "major_t", "label": "Total CPI"},
+    {"code": "NG", "column": "major_ng", "label": "Food and non-alcoholic beverages", "weight_pct": 10.307},
+    {"code": "AGT", "column": "major_agt", "label": "Alcoholic beverages and tobacco", "weight_pct": 3.468},
+    {"code": "BS", "column": "major_bs", "label": "Clothing and footwear", "weight_pct": 2.420},
+    {"code": "WE", "column": "major_we", "label": "Housing and energy", "weight_pct": 25.595},
+    {"code": "HH", "column": "major_hh", "label": "Household goods and services", "weight_pct": 3.302},
+    {"code": "G", "column": "major_g", "label": "Health", "weight_pct": 17.379},
+    {"code": "V", "column": "major_v", "label": "Transport", "weight_pct": 10.715},
+    {"code": "N", "column": "major_n", "label": "Information and communication", "weight_pct": 3.279},
+    {"code": "FK", "column": "major_fk", "label": "Recreation, sport and culture", "weight_pct": 7.501},
+    {"code": "EU", "column": "major_eu", "label": "Education", "weight_pct": 0.851},
+    {"code": "RH", "column": "major_rh", "label": "Restaurants and hotels", "weight_pct": 9.568},
+    {"code": "VF", "column": "major_vf", "label": "Insurance and financial services", "weight_pct": 2.252},
+    {"code": "SWD", "column": "major_swd", "label": "Other goods and services", "weight_pct": 3.363},
+    {"code": "T", "column": "major_t", "label": "Total CPI", "weight_pct": 100.000},
 ]
 
 CORE_COLUMNS = [
@@ -694,6 +701,7 @@ def run_major_group_yoy_lps(
         result["group_code"] = group["code"]
         result["group_label"] = group["label"]
         result["group_column"] = group["column"]
+        result["weight_pct"] = group["weight_pct"]
         group_results.append(result)
 
     if use_layered_shocks:
@@ -715,6 +723,7 @@ def run_major_group_yoy_lps(
             layered["group_code"] = group["code"]
             layered["group_label"] = group["label"]
             layered["group_column"] = group["column"]
+            layered["weight_pct"] = group["weight_pct"]
             layered_groups.append(layered)
         groups = pd.concat(layered_groups, ignore_index=True) if layered_groups else pd.DataFrame()
     elif group_results:
@@ -812,6 +821,7 @@ def run_major_group_asymmetry_yoy_lps(
         one_shock["group_code"] = group["code"]
         one_shock["group_label"] = group["label"]
         one_shock["group_column"] = group["column"]
+        one_shock["weight_pct"] = group["weight_pct"]
         one_shock_groups.append(one_shock)
 
         if use_layered_shocks:
@@ -821,6 +831,7 @@ def run_major_group_asymmetry_yoy_lps(
         displayed["group_code"] = group["code"]
         displayed["group_label"] = group["label"]
         displayed["group_column"] = group["column"]
+        displayed["weight_pct"] = group["weight_pct"]
         maintained_groups.append(displayed)
 
     groups = pd.concat(maintained_groups, ignore_index=True) if maintained_groups else pd.DataFrame()
@@ -1295,7 +1306,7 @@ def draw_major_group_grid(group_results: pd.DataFrame, headline_results: pd.Data
                 linestyle="--",
                 label="Headline CPI",
             )
-        ax.set_title(f"{group['code']}: {group['label']}", fontsize=10, pad=8)
+        ax.set_title(f"{group['code']}: {group['label']} ({group['weight_pct']:.1f}%)", fontsize=10, pad=8)
         ax.grid(True, alpha=0.22)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -1370,7 +1381,7 @@ def draw_major_group_asymmetry_grid(group_results: pd.DataFrame, headline_result
                 linestyle="--",
                 label="Headline CPI",
             )
-        ax.set_title(f"{group['code']}: {group['label']}", fontsize=10, pad=8)
+        ax.set_title(f"{group['code']}: {group['label']} ({group['weight_pct']:.1f}%)", fontsize=10, pad=8)
         ax.grid(True, alpha=0.22)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -1385,6 +1396,96 @@ def draw_major_group_asymmetry_grid(group_results: pd.DataFrame, headline_result
         axes[row * ncols].set_ylabel("Percentage points")
 
     fig.suptitle(title, fontsize=13, y=0.995)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
+def draw_major_group_horizon_bars(
+    group_results: pd.DataFrame,
+    headline_results: pd.DataFrame,
+    component: str | None = None,
+) -> None:
+    plot_data = group_results.dropna(subset=["beta"]).copy()
+    if plot_data.empty:
+        st.info("Not enough observations for the horizon ranking.")
+        return
+    if component is not None and "shock_component" in plot_data:
+        plot_data = plot_data.loc[plot_data["shock_component"].eq(component)].copy()
+    plot_data = plot_data.loc[plot_data["group_code"].ne("T")].copy()
+    if plot_data.empty:
+        st.info("Not enough non-total group observations for the horizon ranking.")
+        return
+
+    plot_data["weighted_contribution"] = plot_data["beta"] * plot_data["weight_pct"] / 100
+    headline_plot = headline_results.dropna(subset=["beta"]).copy()
+    horizons = [(12, "1 year"), (24, "2 years"), (36, "3 years"), ("cum36", "Cumulated 0-36 months")]
+
+    fig, axes = plt.subplots(len(horizons), 1, figsize=(12, 19), sharex=False)
+    axes = np.atleast_1d(axes).ravel()
+    for ax, (horizon, label) in zip(axes, horizons):
+        if horizon == "cum36":
+            current = (
+                plot_data.loc[plot_data["horizon"].between(0, 36)]
+                .groupby(["group_code", "group_label", "weight_pct"], as_index=False)
+                .agg(beta=("beta", "sum"), weighted_contribution=("weighted_contribution", "sum"))
+            )
+            headline_value = headline_plot.loc[headline_plot["horizon"].between(0, 36), "beta"].sum()
+            x_label = "Percentage-point months"
+            title_prefix = "Cumulated through 36 months"
+        else:
+            current = plot_data.loc[plot_data["horizon"].eq(horizon)].copy()
+            headline_at_horizon = headline_plot.loc[headline_plot["horizon"].eq(horizon), "beta"]
+            headline_value = float(headline_at_horizon.iloc[0]) if not headline_at_horizon.empty else np.nan
+            x_label = "Percentage points"
+            title_prefix = f"After {label}"
+        if current.empty:
+            ax.text(0.5, 0.5, f"No horizon {horizon} estimate", ha="center", va="center", transform=ax.transAxes)
+            ax.axis("off")
+            continue
+
+        current["bar_label"] = current["group_code"] + "  " + current["group_label"]
+        current = current.sort_values("beta", ascending=True)
+        y = np.arange(len(current))
+        height = 0.36
+        ax.axvline(0, color="#4B5563", linewidth=0.9)
+        ax.barh(
+            y + height / 2,
+            current["beta"].to_numpy(),
+            height=height,
+            color="#0F766E",
+            alpha=0.86,
+            label="Subgroup IRF",
+        )
+        ax.barh(
+            y - height / 2,
+            current["weighted_contribution"].to_numpy(),
+            height=height,
+            color="#B45309",
+            alpha=0.78,
+            label="Weighted contribution",
+        )
+        if np.isfinite(headline_value):
+            ax.axvline(
+                float(headline_value),
+                color="#111827",
+                linestyle="--",
+                linewidth=1.4,
+                label="Headline CPI IRF",
+            )
+        contribution_sum = current["weighted_contribution"].sum()
+        ax.set_yticks(y)
+        ax.set_yticklabels(current["bar_label"], fontsize=8)
+        ax.set_title(
+            f"{title_prefix}: sorted by subgroup y/y IRF; contribution sum = {contribution_sum:.3f}",
+            fontsize=11,
+            pad=8,
+        )
+        ax.set_xlabel(x_label)
+        ax.grid(True, axis="x", alpha=0.24)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(frameon=False, fontsize=8, loc="best")
+
     fig.tight_layout()
     st.pyplot(fig, clear_figure=True)
 
@@ -1539,6 +1640,8 @@ The asymmetry page estimates separate appreciation and depreciation coefficients
     st.markdown(
         """
 The major-group page estimates direct y/y LPs for each SNB CPI major group and overlays the headline CPI response as a black dashed reference. These subgroup IRFs are not CPI-weighted contributions to headline inflation. The `T: Total CPI` panel is the SNB total CPI major-group series; the dashed line is the headline CPI series used elsewhere in the dashboard.
+
+Panel titles show the 2026 BFS LIK basket weights in percent. These weights are metadata for interpretation; they do not rescale the plotted IRFs.
 """
     )
 
@@ -1639,6 +1742,7 @@ def render_data_page(data: pd.DataFrame) -> None:
             index=0,
         )
         selected_group = MAJOR_GROUPS[group_options.index(group_choice)]
+        control_a.caption(f"2026 CPI basket weight: {selected_group['weight_pct']:.3f}%")
         show_group_nsa = control_b.toggle("NSA", value=True, key="major_group_nsa")
         show_group_sa = control_c.toggle("SA", value=True, key="major_group_sa")
         group_columns = []
@@ -1665,6 +1769,7 @@ def render_data_page(data: pd.DataFrame) -> None:
                 {
                     "code": [group["code"] for group in MAJOR_GROUPS],
                     "label": [group["label"] for group in MAJOR_GROUPS],
+                    "weight_pct": [group["weight_pct"] for group in MAJOR_GROUPS],
                     "nsa_column": [group["column"] for group in MAJOR_GROUPS],
                     "sa_column": [f"{group['column']}_sa" for group in MAJOR_GROUPS],
                 }
@@ -2374,6 +2479,20 @@ def render_major_groups_page(data: pd.DataFrame) -> None:
             headline_results,
             f"SNB CPI Major Groups: Asymmetric y/y Responses to {shock_label} ({shock_path_label})",
         )
+
+    st.subheader("Horizon Ranking and Contributions")
+    st.caption(
+        "Bars compare each subgroup y/y IRF with its CPI-weighted contribution "
+        "(2026 BFS LIK weight times subgroup IRF). Point-in-time contributions are percentage points; "
+        "the cumulated chart sums y/y effects over months 0-36 and is in percentage-point months. "
+        "All contribution charts exclude the total-CPI panel."
+    )
+    ranking_component = None
+    if "shock_component" in group_results.columns:
+        components = list(group_results["shock_component"].dropna().unique())
+        if components:
+            ranking_component = st.selectbox("Rank component", components, index=0)
+    draw_major_group_horizon_bars(group_results, headline_results, component=ranking_component)
 
     st.subheader("Results")
     if mode_label == "Symmetric":
