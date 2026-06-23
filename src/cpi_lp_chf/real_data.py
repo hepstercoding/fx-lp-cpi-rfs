@@ -33,6 +33,7 @@ SNB_PRODUCT_TYPE_ORIGIN_CUBE_ID = "plkoprart"
 SNB_MAJOR_GROUP_CUBE_ID = "plkoprgru"
 SNB_CORE1_SERIES_CODE = "K1"
 SNB_CORE2_SERIES_CODE = "K2"
+SNB_FRESH_SEASONAL_SERIES_CODE = "FP"
 SNB_ENERGY_FUEL_SERIES_CODE = "ET"
 SNB_GOODS_SERIES_CODE = "T0"
 SNB_SERVICES_SERIES_CODE = "T1"
@@ -280,6 +281,11 @@ def fetch_ch_energy_fuel_index() -> pd.DataFrame:
     return seasonally_adjust_index(energy, "energy_fuel", "energy_fuel_sa")
 
 
+def fetch_ch_fresh_seasonal_index() -> pd.DataFrame:
+    fresh = fetch_snb_cube_series(SNB_CPI_CUBE_ID, SNB_FRESH_SEASONAL_SERIES_CODE, "fresh_seasonal")
+    return seasonally_adjust_index(fresh, "fresh_seasonal", "fresh_seasonal_sa")
+
+
 def fetch_ch_product_type_origin_indices() -> pd.DataFrame:
     series = [
         (SNB_GOODS_SERIES_CODE, "goods"),
@@ -317,12 +323,24 @@ def build_real_dataset(
     ea_core = fetch_ea_core_inflation()
     unemployment = fetch_ch_unemployment_monthly()
     core_cpi = fetch_ch_core_cpi_indices()
+    fresh_seasonal = fetch_ch_fresh_seasonal_index()
     energy = fetch_ch_energy_fuel_index()
     product_type_origin = fetch_ch_product_type_origin_indices()
     major_groups = fetch_ch_major_group_indices()
 
     merged = cpi.merge(chf_neer, on="date", how="inner")
-    for add_on in (eurchf, usdchf, brent, ea_core, unemployment, core_cpi, energy, product_type_origin, major_groups):
+    for add_on in (
+        eurchf,
+        usdchf,
+        brent,
+        ea_core,
+        unemployment,
+        core_cpi,
+        fresh_seasonal,
+        energy,
+        product_type_origin,
+        major_groups,
+    ):
         merged = merged.merge(add_on, on="date", how="left")
 
     merged = merged.sort_values("date").reset_index(drop=True)

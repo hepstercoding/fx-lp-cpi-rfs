@@ -62,6 +62,20 @@ SOURCE_ROWS = [
         "Notes": "Seasonally adjusted with STL in the project pipeline.",
     },
     {
+        "Variable": "Swiss fresh and seasonal products CPI",
+        "Columns": "fresh_seasonal, fresh_seasonal_sa",
+        "Source": "SNB data portal, plkoprex, code FP",
+        "URL": "https://data.snb.ch/en/topics/uvo/cube/plkoprex?dimSel=D0(K1,FP,ET)",
+        "Notes": "Seasonally adjusted with STL in the project pipeline.",
+    },
+    {
+        "Variable": "Swiss energy and fuels CPI",
+        "Columns": "energy_fuel, energy_fuel_sa",
+        "Source": "SNB data portal, plkoprex, code ET",
+        "URL": "https://data.snb.ch/en/topics/uvo/cube/plkoprex?dimSel=D0(K1,FP,ET)",
+        "Notes": "Seasonally adjusted with STL in the project pipeline.",
+    },
+    {
         "Variable": "Euro area core HICP",
         "Columns": "ea_core_hicp, ea_core_inflation",
         "Source": "ECB Data Portal, HICP.M.U2.Y.XEF000.4F0.INX",
@@ -96,6 +110,13 @@ SOURCE_ROWS = [
         "URL": "https://www.bfs.admin.ch/bfs/de/home/statistiken/preise/erhebungen/lik/warenkorb.html",
         "Notes": "Annual basket shares in percent. Used as metadata for the major-group dashboard panels.",
     },
+    {
+        "Variable": "Swiss CPI focus weights",
+        "Columns": "weight_pct metadata",
+        "Source": "SNB data portal, plkoprex, 2026 index aggregation identity",
+        "URL": "https://data.snb.ch/en/topics/uvo/cube/plkoprex?dimSel=D0(K1,FP,ET)",
+        "Notes": "Recovered from the 2026 headline identity: headline = Core 1 + fresh/seasonal + energy/fuels weighted aggregate.",
+    },
 ]
 
 MAJOR_GROUPS = [
@@ -115,6 +136,13 @@ MAJOR_GROUPS = [
     {"code": "T", "column": "major_t", "label": "Total CPI", "weight_pct": 100.000},
 ]
 
+FOCUS_GROUPS = [
+    {"code": "HEADLINE", "column": "cpi", "label": "Headline CPI", "weight_pct": 100.000},
+    {"code": "K1", "column": "core_cpi_1", "label": "Core CPI 1", "weight_pct": 84.205},
+    {"code": "FP", "column": "fresh_seasonal", "label": "Fresh and seasonal products", "weight_pct": 10.717},
+    {"code": "ET", "column": "energy_fuel", "label": "Energy and fuels", "weight_pct": 5.078},
+]
+
 CORE_COLUMNS = [
     "cpi",
     "cpi_sa",
@@ -125,6 +153,10 @@ CORE_COLUMNS = [
     "core_cpi_1_sa",
     "core_cpi_2",
     "core_cpi_2_sa",
+    "fresh_seasonal",
+    "fresh_seasonal_sa",
+    "energy_fuel",
+    "energy_fuel_sa",
     "ea_core_hicp",
     "ea_core_inflation",
     "brent_oil",
@@ -138,6 +170,8 @@ PRICE_SERIES = {
     "Headline CPI": ("cpi", "cpi_sa"),
     "Core CPI 1": ("core_cpi_1", "core_cpi_1_sa"),
     "Core CPI 2": ("core_cpi_2", "core_cpi_2_sa"),
+    "Fresh and seasonal products": ("fresh_seasonal", "fresh_seasonal_sa"),
+    "Energy and fuels CPI": ("energy_fuel", "energy_fuel_sa"),
 }
 
 CONTROL_CHARTS = {
@@ -191,6 +225,7 @@ LP_RESPONSES = {
     "Headline CPI": {"nsa": "cpi", "sa": "cpi_sa"},
     "Core CPI 1": {"nsa": "core_cpi_1", "sa": "core_cpi_1_sa"},
     "Core CPI 2": {"nsa": "core_cpi_2", "sa": "core_cpi_2_sa"},
+    "Fresh and seasonal products": {"nsa": "fresh_seasonal", "sa": "fresh_seasonal_sa"},
     "Energy and fuels CPI": {"nsa": "energy_fuel", "sa": "energy_fuel_sa"},
     "Goods CPI": {"nsa": "goods", "sa": "goods_sa"},
     "Services CPI": {"nsa": "services", "sa": "services_sa"},
@@ -270,6 +305,8 @@ def add_transforms(data: pd.DataFrame) -> pd.DataFrame:
         "core_1_sa": "core_cpi_1_sa",
         "core_2_nsa": "core_cpi_2",
         "core_2_sa": "core_cpi_2_sa",
+        "fresh_seasonal_nsa": "fresh_seasonal",
+        "fresh_seasonal_sa": "fresh_seasonal_sa",
         "energy_fuel_nsa": "energy_fuel",
         "energy_fuel_sa": "energy_fuel_sa",
         "goods_nsa": "goods",
@@ -306,6 +343,8 @@ def response_column(base_column: str, transform_label: str) -> str:
         "core_cpi_1_sa": "core_1_sa",
         "core_cpi_2": "core_2_nsa",
         "core_cpi_2_sa": "core_2_sa",
+        "fresh_seasonal": "fresh_seasonal_nsa",
+        "fresh_seasonal_sa": "fresh_seasonal_sa",
         "energy_fuel": "energy_fuel_nsa",
         "energy_fuel_sa": "energy_fuel_sa",
         "goods": "goods_nsa",
@@ -835,6 +874,202 @@ def run_major_group_asymmetry_yoy_lps(
         maintained_groups.append(displayed)
 
     groups = pd.concat(maintained_groups, ignore_index=True) if maintained_groups else pd.DataFrame()
+    one_shock = pd.concat(one_shock_groups, ignore_index=True) if one_shock_groups else pd.DataFrame()
+    return groups, headline_reference, one_shock, shock_path_results
+
+
+@st.cache_data(show_spinner=False)
+def run_focus_group_yoy_lps(
+    data: pd.DataFrame,
+    seasonal_adjustment: str,
+    controls: list[str],
+    shock_name: str,
+    shock_level_response: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    horizons: int,
+    lags: int,
+    use_layered_shocks: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    data = add_transforms(data)
+    sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    config = LPConfig(
+        horizons=horizons,
+        lags=lags,
+        ci_level=0.9,
+        include_forward_shocks=False,
+    )
+    headline_base = LP_RESPONSES["Headline CPI"][seasonal_adjustment.lower()]
+    headline_response = response_column(headline_base, "y/y inflation")
+    headline_results = estimate_dashboard_lp(
+        data=sample,
+        response=headline_response,
+        shock_name=shock_name,
+        controls=controls,
+        config=config,
+        response_label="Headline CPI y/y inflation",
+        cumulative_response=False,
+    )
+    headline_results["group_code"] = "HEADLINE"
+    headline_results["group_label"] = "Headline CPI"
+
+    shock_path_results = estimate_dashboard_lp(
+        data=sample,
+        response=shock_level_response,
+        shock_name=shock_name,
+        controls=controls,
+        config=config,
+        response_label="CHF path",
+        cumulative_response=True,
+    )
+
+    focus_results = []
+    for group in FOCUS_GROUPS:
+        base_column = group["column"] if seasonal_adjustment == "NSA" else f"{group['column']}_sa"
+        if base_column not in sample.columns:
+            continue
+        response_name = response_column(base_column, "y/y inflation")
+        if response_name not in sample.columns:
+            continue
+        result = estimate_dashboard_lp(
+            data=sample,
+            response=response_name,
+            shock_name=shock_name,
+            controls=controls,
+            config=config,
+            response_label=f"{group['label']} y/y inflation",
+            cumulative_response=False,
+        )
+        if use_layered_shocks:
+            result = maintained_response_from_irfs(
+                result,
+                shock_path_results,
+                f"{group['label']} maintained symmetric IRF",
+            )
+        result["group_code"] = group["code"]
+        result["group_label"] = group["label"]
+        result["group_column"] = group["column"]
+        result["weight_pct"] = group["weight_pct"]
+        focus_results.append(result)
+
+    groups = pd.concat(focus_results, ignore_index=True) if focus_results else pd.DataFrame()
+    if use_layered_shocks:
+        headline_results = maintained_response_from_irfs(
+            headline_results,
+            shock_path_results,
+            "Headline CPI maintained symmetric IRF",
+        )
+        headline_results["group_code"] = "HEADLINE"
+        headline_results["group_label"] = "Headline CPI"
+    return groups, headline_results
+
+
+@st.cache_data(show_spinner=False)
+def run_focus_group_asymmetry_yoy_lps(
+    data: pd.DataFrame,
+    seasonal_adjustment: str,
+    controls: list[str],
+    shock_name: str,
+    shock_level_response: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    horizons: int,
+    lags: int,
+    use_layered_shocks: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    data = add_transforms(data)
+    shock_path_results = run_asymmetric_lp(
+        data=data,
+        response=shock_level_response,
+        display_response=shock_level_response,
+        response_label="CHF path",
+        transform_label="Cumulative price difference",
+        display_transform_label="Cumulative price difference",
+        controls=controls,
+        shock_name=shock_name,
+        start=start,
+        end=end,
+        horizons=horizons,
+        lags=lags,
+        include_forward_shocks=False,
+        event_windows=[],
+    )
+
+    headline_base = LP_RESPONSES["Headline CPI"][seasonal_adjustment.lower()]
+    headline_response = response_column(headline_base, "y/y inflation")
+    symmetric_headline, symmetric_chf, _, _ = run_lp(
+        data=data,
+        response=headline_response,
+        display_response=headline_response,
+        price_response=response_column(headline_base, "Cumulative price difference"),
+        response_label="Headline CPI",
+        transform_label="y/y inflation",
+        display_transform_label="y/y inflation",
+        controls=controls,
+        shock_name=shock_name,
+        shock_level_response=shock_level_response,
+        shock_response_label="CHF path",
+        start=start,
+        end=end,
+        horizons=horizons,
+        lags=lags,
+        include_forward_shocks=False,
+        event_windows=[],
+    )
+    if use_layered_shocks:
+        headline_reference = maintained_response_from_irfs(
+            symmetric_headline,
+            symmetric_chf,
+            "Headline CPI maintained symmetric IRF",
+        )
+    else:
+        headline_reference = symmetric_headline.copy()
+    headline_reference["group_code"] = "HEADLINE"
+    headline_reference["group_label"] = "Headline CPI"
+    headline_reference["weight_pct"] = 100.0
+
+    displayed_groups = []
+    one_shock_groups = []
+    for group in FOCUS_GROUPS:
+        base_column = group["column"] if seasonal_adjustment == "NSA" else f"{group['column']}_sa"
+        if base_column not in data.columns:
+            continue
+        response_name = response_column(base_column, "y/y inflation")
+        if response_name not in data.columns:
+            continue
+        one_shock = run_asymmetric_lp(
+            data=data,
+            response=response_name,
+            display_response=response_name,
+            response_label=group["label"],
+            transform_label="y/y inflation",
+            display_transform_label="y/y inflation",
+            controls=controls,
+            shock_name=shock_name,
+            start=start,
+            end=end,
+            horizons=horizons,
+            lags=lags,
+            include_forward_shocks=False,
+            event_windows=[],
+        )
+        one_shock["group_code"] = group["code"]
+        one_shock["group_label"] = group["label"]
+        one_shock["group_column"] = group["column"]
+        one_shock["weight_pct"] = group["weight_pct"]
+        one_shock_groups.append(one_shock)
+
+        if use_layered_shocks:
+            displayed = build_maintained_asymmetry_results(one_shock, shock_path_results)
+        else:
+            displayed = one_shock.copy()
+        displayed["group_code"] = group["code"]
+        displayed["group_label"] = group["label"]
+        displayed["group_column"] = group["column"]
+        displayed["weight_pct"] = group["weight_pct"]
+        displayed_groups.append(displayed)
+
+    groups = pd.concat(displayed_groups, ignore_index=True) if displayed_groups else pd.DataFrame()
     one_shock = pd.concat(one_shock_groups, ignore_index=True) if one_shock_groups else pd.DataFrame()
     return groups, headline_reference, one_shock, shock_path_results
 
@@ -1372,6 +1607,298 @@ def draw_major_group_asymmetry_grid(group_results: pd.DataFrame, headline_result
     st.pyplot(fig, clear_figure=True)
 
 
+def draw_focus_group_grid(group_results: pd.DataFrame, headline_results: pd.DataFrame, title: str) -> None:
+    plot_data = group_results.dropna(subset=["beta"])
+    headline_plot = headline_results.dropna(subset=["beta"])
+    if plot_data.empty:
+        st.info("Not enough observations for the selected focus-group specification.")
+        return
+
+    groups = [group for group in FOCUS_GROUPS if group["code"] in set(plot_data["group_code"])]
+    fig, axes = plt.subplots(2, 2, figsize=(13, 7.8), sharex=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, group in zip(axes, groups):
+        current = plot_data.loc[plot_data["group_code"].eq(group["code"])].sort_values("horizon")
+        x = current["horizon"].to_numpy()
+        ax.axhline(0, color="#4B5563", linewidth=0.8)
+        ax.plot(x, current["beta"].to_numpy(), color="#0F766E", linewidth=2.1, label=group["label"])
+        if current[["ci_lower", "ci_upper"]].notna().all(axis=None):
+            ax.fill_between(
+                x,
+                current["ci_lower"].to_numpy(),
+                current["ci_upper"].to_numpy(),
+                color="#0F766E",
+                alpha=0.14,
+                label="90% CI",
+            )
+        if group["code"] != "HEADLINE" and not headline_plot.empty:
+            ax.plot(
+                headline_plot["horizon"].to_numpy(),
+                headline_plot["beta"].to_numpy(),
+                color="#111827",
+                linewidth=1.8,
+                linestyle="--",
+                label="Headline CPI",
+            )
+        if "weight_pct" in current and current["weight_pct"].notna().any():
+            weight = float(current["weight_pct"].dropna().iloc[0])
+            title_label = f"{group['code']}: {group['label']} ({weight:.1f}%)"
+        else:
+            title_label = f"{group['code']}: {group['label']}"
+        ax.set_title(title_label, fontsize=11, pad=8)
+        ax.grid(True, alpha=0.22)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(frameon=False, fontsize=8, loc="best")
+
+    for ax in axes[len(groups) :]:
+        ax.axis("off")
+    for ax in axes[-2:]:
+        ax.set_xlabel("Months after CHF shock")
+    axes[0].set_ylabel("Percentage points")
+    axes[2].set_ylabel("Percentage points")
+
+    fig.suptitle(title, fontsize=13, y=0.995)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
+def draw_focus_group_asymmetry_grid(group_results: pd.DataFrame, headline_results: pd.DataFrame, title: str) -> None:
+    plot_data = group_results.dropna(subset=["beta"])
+    headline_plot = headline_results.dropna(subset=["beta"])
+    if plot_data.empty:
+        st.info("Not enough observations for the selected focus-group asymmetry specification.")
+        return
+
+    groups = [group for group in FOCUS_GROUPS if group["code"] in set(plot_data["group_code"])]
+    fig, axes = plt.subplots(2, 2, figsize=(13, 7.8), sharex=True)
+    axes = np.atleast_1d(axes).ravel()
+    colors = {
+        "Maintained +1% CHF appreciation": "#0F766E",
+        "-1 x maintained 1% CHF depreciation": "#B45309",
+        "+1pp CHF appreciation": "#0F766E",
+        "-1 x 1pp CHF depreciation": "#B45309",
+    }
+
+    for ax, group in zip(axes, groups):
+        current = plot_data.loc[plot_data["group_code"].eq(group["code"])].sort_values(["shock_component", "horizon"])
+        ax.axhline(0, color="#4B5563", linewidth=0.8)
+        for component, component_data in current.groupby("shock_component", sort=False):
+            x = component_data["horizon"].to_numpy()
+            color = colors.get(component, "#2563EB")
+            ax.plot(x, component_data["beta"].to_numpy(), color=color, linewidth=1.9, label=component)
+            if component_data[["ci_lower", "ci_upper"]].notna().all(axis=None):
+                ax.fill_between(
+                    x,
+                    component_data["ci_lower"].to_numpy(),
+                    component_data["ci_upper"].to_numpy(),
+                    color=color,
+                    alpha=0.11,
+                )
+        if group["code"] != "HEADLINE" and not headline_plot.empty:
+            ax.plot(
+                headline_plot["horizon"].to_numpy(),
+                headline_plot["beta"].to_numpy(),
+                color="#111827",
+                linewidth=1.6,
+                linestyle="--",
+                label="Headline symmetric IRF",
+            )
+        weight = group.get("weight_pct")
+        title_label = f"{group['code']}: {group['label']} ({weight:.1f}%)" if weight is not None else f"{group['code']}: {group['label']}"
+        ax.set_title(title_label, fontsize=11, pad=8)
+        ax.grid(True, alpha=0.22)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(frameon=False, fontsize=7, loc="best")
+
+    for ax in axes[len(groups) :]:
+        ax.axis("off")
+    for ax in axes[-2:]:
+        ax.set_xlabel("Months after initial CHF shock")
+    axes[0].set_ylabel("Percentage points")
+    axes[2].set_ylabel("Percentage points")
+
+    fig.suptitle(title, fontsize=13, y=0.995)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
+def focus_bottom_up_contributions(group_results: pd.DataFrame, headline_results: pd.DataFrame) -> pd.DataFrame:
+    required_codes = {"K1", "FP", "ET"}
+    pieces = group_results.loc[group_results["group_code"].isin(required_codes)].dropna(subset=["beta"]).copy()
+    if pieces.empty or not required_codes.issubset(set(pieces["group_code"])):
+        return pd.DataFrame()
+
+    pieces["contribution"] = pieces["beta"] * pieces["weight_pct"] / 100
+    pieces["contribution_std_error"] = pieces["std_error"] * pieces["weight_pct"] / 100
+    bottom_up = (
+        pieces.groupby("horizon", as_index=False)
+        .agg(
+            bottom_up_beta=("contribution", "sum"),
+            bottom_up_var=("contribution_std_error", lambda x: float(np.sum(np.square(x)))),
+        )
+        .sort_values("horizon")
+    )
+    bottom_up["bottom_up_std_error"] = np.sqrt(bottom_up["bottom_up_var"])
+    z = 1.6448536269514722
+    bottom_up["bottom_up_ci_lower"] = bottom_up["bottom_up_beta"] - z * bottom_up["bottom_up_std_error"]
+    bottom_up["bottom_up_ci_upper"] = bottom_up["bottom_up_beta"] + z * bottom_up["bottom_up_std_error"]
+
+    headline = headline_results.loc[:, ["horizon", "beta", "std_error", "ci_lower", "ci_upper"]].rename(
+        columns={
+            "beta": "top_down_beta",
+            "std_error": "top_down_std_error",
+            "ci_lower": "top_down_ci_lower",
+            "ci_upper": "top_down_ci_upper",
+        }
+    )
+    out = pieces.merge(bottom_up, on="horizon", how="left").merge(headline, on="horizon", how="left")
+    out["bottom_up_gap"] = out["bottom_up_beta"] - out["top_down_beta"]
+    return out
+
+
+def draw_focus_contribution_chart(
+    group_results: pd.DataFrame,
+    headline_results: pd.DataFrame,
+    component: str | None = None,
+    title_suffix: str = "",
+) -> pd.DataFrame:
+    chart_results = group_results
+    if component is not None and "shock_component" in chart_results:
+        chart_results = chart_results.loc[chart_results["shock_component"].eq(component)].copy()
+    headline_for_chart = headline_results
+    if "group_code" in chart_results:
+        headline_component = chart_results.loc[chart_results["group_code"].eq("HEADLINE")].copy()
+        if not headline_component.empty:
+            headline_for_chart = headline_component
+    contribution_data = focus_bottom_up_contributions(chart_results, headline_for_chart)
+    if contribution_data.empty:
+        st.info("Not enough estimates to build the bottom-up focus contribution chart.")
+        return contribution_data
+
+    colors = {
+        "K1": "#0F766E",
+        "FP": "#2563EB",
+        "ET": "#B45309",
+    }
+    fig, axes = plt.subplots(2, 1, figsize=(11.5, 8.2), sharex=True)
+
+    for code, group in contribution_data.groupby("group_code", sort=False):
+        label = group["group_label"].iloc[0]
+        weight = float(group["weight_pct"].iloc[0])
+        axes[0].plot(
+            group["horizon"],
+            group["contribution"],
+            linewidth=2,
+            color=colors.get(code, "#4B5563"),
+            label=f"{label} ({weight:.1f}%)",
+        )
+    axes[0].axhline(0, color="#4B5563", linewidth=0.9)
+    suffix = f": {title_suffix}" if title_suffix else ""
+    axes[0].set_title(f"Weighted Contributions to Headline CPI IRF{suffix}", fontsize=12, pad=10)
+    axes[0].set_ylabel("Percentage points")
+    axes[0].grid(True, alpha=0.24)
+    axes[0].spines["top"].set_visible(False)
+    axes[0].spines["right"].set_visible(False)
+    axes[0].legend(frameon=False, fontsize=8, ncols=3)
+
+    comparison = (
+        contribution_data.loc[
+            :,
+            [
+                "horizon",
+                "bottom_up_beta",
+                "bottom_up_ci_lower",
+                "bottom_up_ci_upper",
+                "top_down_beta",
+                "top_down_ci_lower",
+                "top_down_ci_upper",
+                "bottom_up_gap",
+            ],
+        ]
+        .drop_duplicates()
+        .sort_values("horizon")
+    )
+    component_order = ["K1", "FP", "ET"]
+    component_labels = {
+        code: contribution_data.loc[contribution_data["group_code"].eq(code), "group_label"].iloc[0]
+        for code in component_order
+        if code in set(contribution_data["group_code"])
+    }
+    stacked = (
+        contribution_data.pivot_table(
+            index="horizon",
+            columns="group_code",
+            values="contribution",
+            aggfunc="first",
+        )
+        .reindex(comparison["horizon"])
+        .fillna(0.0)
+    )
+    x = comparison["horizon"].to_numpy()
+    axes[1].axhline(0, color="#4B5563", linewidth=0.9)
+    positive_base = np.zeros(len(stacked))
+    negative_base = np.zeros(len(stacked))
+    for code in component_order:
+        if code not in stacked:
+            continue
+        values = stacked[code].to_numpy(dtype=float)
+        positive = np.where(values > 0, values, 0.0)
+        negative = np.where(values < 0, values, 0.0)
+        color = colors.get(code, "#4B5563")
+        label = f"{component_labels.get(code, code)} contribution"
+        if np.any(positive):
+            axes[1].fill_between(
+                x,
+                positive_base,
+                positive_base + positive,
+                color=color,
+                alpha=0.22,
+                linewidth=0,
+                label=label,
+            )
+            positive_base = positive_base + positive
+        if np.any(negative):
+            axes[1].fill_between(
+                x,
+                negative_base,
+                negative_base + negative,
+                color=color,
+                alpha=0.22,
+                linewidth=0,
+                label=label if not np.any(positive) else None,
+            )
+            negative_base = negative_base + negative
+    axes[1].plot(
+        comparison["horizon"],
+        comparison["bottom_up_beta"],
+        color="#0F766E",
+        linewidth=2.3,
+        label="Bottom-up: K1 + FP + ET contributions",
+    )
+    axes[1].plot(
+        comparison["horizon"],
+        comparison["top_down_beta"],
+        color="#111827",
+        linewidth=2,
+        linestyle="--",
+        label="Top-down headline CPI IRF",
+    )
+    axes[1].set_title(f"Bottom-Up Focus Decomposition vs Top-Down Headline IRF{suffix}", fontsize=12, pad=10)
+    axes[1].set_xlabel("Months after CHF shock")
+    axes[1].set_ylabel("Percentage points")
+    axes[1].grid(True, alpha=0.24)
+    axes[1].spines["top"].set_visible(False)
+    axes[1].spines["right"].set_visible(False)
+    axes[1].legend(frameon=False, fontsize=8)
+
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    return contribution_data
+
+
 def draw_major_group_horizon_bars(
     group_results: pd.DataFrame,
     headline_results: pd.DataFrame,
@@ -1574,7 +2101,11 @@ def equation_text(
 
 def sidebar() -> tuple[str, Path]:
     st.sidebar.title("CPI LP Dashboard")
-    page = st.sidebar.radio("Page", ["Baseline LP", "Asymmetry LP", "Major Groups", "Data", "Methodology"], index=0)
+    page = st.sidebar.radio(
+        "Page",
+        ["Baseline LP", "Asymmetry LP", "Major Groups", "Focus Groups", "Data", "Methodology"],
+        index=0,
+    )
     data_path_text = st.sidebar.text_input("Data file", str(DEFAULT_DATA_PATH))
     return page, Path(data_path_text).expanduser()
 
@@ -1687,7 +2218,7 @@ def render_data_page(data: pd.DataFrame) -> None:
     col_c.metric("End", sample["date"].max().strftime("%Y-%m"))
     col_d.metric("Active columns", f"{len(available_columns)}/{len(CORE_COLUMNS)}")
 
-    tabs = st.tabs(["Sources", "Coverage", "Headline and Core", "Major Groups", "FX and Controls", "Panel"])
+    tabs = st.tabs(["Sources", "Coverage", "Headline and Focus", "Major Groups", "FX and Controls", "Panel"])
 
     with tabs[0]:
         st.subheader("Source Documentation")
@@ -1704,7 +2235,7 @@ def render_data_page(data: pd.DataFrame) -> None:
         draw_missingness_heatmap(sample, available_columns)
 
     with tabs[2]:
-        st.subheader("Headline and Core CPI")
+        st.subheader("Headline and Focus CPI Series")
         control_a, control_b, control_c = st.columns([1.5, 1, 1])
         price_choice = control_a.selectbox("Series", list(PRICE_SERIES), index=0)
         show_nsa = control_b.toggle("NSA", value=True)
@@ -1720,8 +2251,14 @@ def render_data_page(data: pd.DataFrame) -> None:
         st.divider()
         draw_line_chart(
             sample,
-            ["headline_inflation_yoy", "core_1_inflation_yoy", "core_2_inflation_yoy"],
-            "Headline and Core CPI Inflation",
+            [
+                "headline_sa_inflation_yoy",
+                "core_1_sa_inflation_yoy",
+                "core_2_sa_inflation_yoy",
+                "fresh_seasonal_sa_inflation_yoy",
+                "energy_fuel_sa_inflation_yoy",
+            ],
+            "Headline, Core, Fresh/Seasonal, and Energy/Fuels Inflation",
             "12-month log change, percent",
         )
 
@@ -2333,6 +2870,245 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
     )
 
 
+def render_focus_groups_page(data: pd.DataFrame) -> None:
+    st.title("Focus Groups")
+    st.caption(
+        "Direct y/y inflation LPs for headline CPI, core CPI 1, fresh and seasonal products, and energy and fuels. "
+        "Non-headline panels include the headline CPI response as a black dashed reference."
+    )
+
+    min_date = data["date"].min().to_pydatetime()
+    max_date = data["date"].max().to_pydatetime()
+
+    with st.container(border=True):
+        col_a, col_b, col_c, col_d = st.columns([1, 0.9, 1.15, 1.05])
+        mode_label = col_a.selectbox("Mode", ["Symmetric", "Asymmetry"], index=0, key="focus_mode")
+        seasonal_adjustment = col_b.selectbox("Index", ["SA", "NSA"], index=0, key="focus_index")
+        shock_path_label = col_c.selectbox("FX path", ["Normal FX IRF", "Layered 1% move"], index=0, key="focus_fx_path")
+        shock_label = col_d.selectbox("CHF shock", available_exchange_rate_shocks(data), index=0, key="focus_shock")
+        col_d, col_e, col_f, col_g = st.columns([1.4, 1, 1, 1])
+        selected_dates = col_d.slider(
+            "Estimation range",
+            min_value=min_date,
+            max_value=max_date,
+            value=(min_date, max_date),
+            format="YYYY-MM",
+            key="focus_range",
+        )
+        controls_label = col_e.selectbox("Controls", list(LP_CONTROL_SETS), index=1, key="focus_controls")
+        horizons = col_f.number_input("Horizon", min_value=1, max_value=60, value=36, step=1, key="focus_horizon")
+        lags = col_g.number_input(
+            "Lags",
+            min_value=1,
+            max_value=24,
+            value=12 if mode_label == "Symmetric" else 6,
+            step=1,
+            key="focus_lags",
+        )
+
+    start = pd.Timestamp(selected_dates[0])
+    end = pd.Timestamp(selected_dates[1])
+    shock_settings = EXCHANGE_RATE_SHOCKS[shock_label]
+    shock_name = shock_settings["change"]
+    shock_level_response = shock_settings["log_level"]
+    use_layered_shocks = shock_path_label == "Layered 1% move"
+    controls = [control for control in LP_CONTROL_SETS[controls_label] if control in data.columns]
+    sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+
+    st.subheader("Estimated Equation")
+    if mode_label == "Symmetric":
+        st.latex(
+            equation_text(
+                r"\pi^{yy}",
+                "y/y inflation",
+                controls,
+                int(lags),
+                include_forward_shocks=False,
+                include_dummies=False,
+            )
+        )
+    else:
+        control_term = r" + \theta_h' Z_t" if controls else ""
+        lagged_control_term = r" + \sum_{j=1}^{p} \eta_{h,j}' Z_{t-j}" if controls else ""
+        st.latex(
+            rf"\pi^{{yy}}_{{g,t+h}} = \alpha_{{g,h}} + \beta_{{g,h}}^+ \Delta s_t^+ + \beta_{{g,h}}^- \Delta s_t^-"
+            f"{control_term}"
+            rf" + \sum_{{j=1}}^{{p}} \gamma_{{g,h,j}} \pi^{{yy}}_{{g,t-j}}"
+            rf" + \sum_{{j=1}}^{{p}} \left(\delta_{{g,h,j}}^+ \Delta s_{{t-j}}^+ + \delta_{{g,h,j}}^- \Delta s_{{t-j}}^-\right)"
+            rf"{lagged_control_term} + u_{{g,t+h}}, \quad p = {int(lags)}"
+        )
+        st.latex(r"\Delta s_t^+ = \max(\Delta s_t, 0), \qquad \Delta s_t^- = -\min(\Delta s_t, 0)")
+    st.caption(
+        f"The same direct y/y specification is estimated for each focus CPI index using the {seasonal_adjustment} series. "
+        f"Delta s is the monthly {shock_label} log move, with positive values meaning {shock_settings['positive_text']}. "
+        "Confidence intervals are 90% HAC intervals."
+    )
+    st.caption(
+        "Focus weights are 2026 shares recovered from the SNB plkoprex aggregation identity: "
+        "Core 1 84.205%, fresh/seasonal products 10.717%, energy/fuels 5.078%."
+    )
+    st.caption(
+        "Forward CHF shocks are excluded on this page. "
+        + (
+            "FX path: one initial shock followed by the estimated exchange-rate IRF."
+            if not use_layered_shocks
+            else "FX path: layered future shocks keep the selected CHF move at 1%."
+        )
+    )
+    if use_layered_shocks:
+        st.caption("Layered-response confidence bands are approximate and ignore uncertainty in the estimated FX path used for layering.")
+    if mode_label == "Asymmetry":
+        st.caption("Asymmetry mode splits appreciation and depreciation shocks. Depreciation responses are multiplied by -1 for visual comparison.")
+
+    missing_groups = [
+        group["label"]
+        for group in FOCUS_GROUPS
+        if (group["column"] if seasonal_adjustment == "NSA" else f"{group['column']}_sa") not in data.columns
+    ]
+    if missing_groups:
+        st.warning(
+            "Some focus columns are missing from the data file. Refresh the data pipeline to show all panels: "
+            + ", ".join(missing_groups)
+        )
+
+    if mode_label == "Symmetric":
+        group_results, headline_results = run_focus_group_yoy_lps(
+            data=data,
+            seasonal_adjustment=seasonal_adjustment,
+            controls=controls,
+            shock_name=shock_name,
+            shock_level_response=shock_level_response,
+            start=start,
+            end=end,
+            horizons=int(horizons),
+            lags=int(lags),
+            use_layered_shocks=use_layered_shocks,
+        )
+        one_shock_results = pd.DataFrame()
+        shock_path_results = estimate_dashboard_lp(
+            data=add_transforms(data).loc[(data["date"] >= start) & (data["date"] <= end)].copy(),
+            response=shock_level_response,
+            shock_name=shock_name,
+            controls=controls,
+            config=LPConfig(
+                horizons=int(horizons),
+                lags=int(lags),
+                ci_level=0.9,
+                include_forward_shocks=False,
+            ),
+            response_label=shock_settings["level_label"],
+            cumulative_response=True,
+        )
+    else:
+        group_results, headline_results, one_shock_results, shock_path_results = run_focus_group_asymmetry_yoy_lps(
+            data=data,
+            seasonal_adjustment=seasonal_adjustment,
+            controls=controls,
+            shock_name=shock_name,
+            shock_level_response=shock_level_response,
+            start=start,
+            end=end,
+            horizons=int(horizons),
+            lags=int(lags),
+            use_layered_shocks=use_layered_shocks,
+        )
+
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("Rows in sample", f"{len(sample):,}")
+    col_b.metric("First month", sample["date"].min().strftime("%Y-%m"))
+    col_c.metric("Last month", sample["date"].max().strftime("%Y-%m"))
+    col_d.metric("Panels", f"{group_results['group_code'].nunique() if not group_results.empty else 0}/4")
+
+    st.subheader("Bottom-Up Contributions")
+    if mode_label == "Symmetric":
+        contribution_data = draw_focus_contribution_chart(group_results, headline_results)
+    else:
+        appreciation_component = "Maintained +1% CHF appreciation" if use_layered_shocks else "+1pp CHF appreciation"
+        depreciation_component = "-1 x maintained 1% CHF depreciation" if use_layered_shocks else "-1 x 1pp CHF depreciation"
+        contribution_data = pd.concat(
+            [
+                draw_focus_contribution_chart(
+                    group_results,
+                    headline_results,
+                    component=appreciation_component,
+                    title_suffix="Appreciation",
+                ),
+                draw_focus_contribution_chart(
+                    group_results,
+                    headline_results,
+                    component=depreciation_component,
+                    title_suffix="Depreciation x -1",
+                ),
+            ],
+            ignore_index=True,
+        )
+    st.caption(
+        "Bottom-up IRF is the weighted sum of Core 1, fresh/seasonal products, and energy/fuels IRFs. "
+        "Contribution uncertainty uses a diagonal approximation and ignores covariance across component estimates."
+    )
+
+    st.subheader("Focus IRFs")
+    if mode_label == "Symmetric":
+        draw_focus_group_grid(
+            group_results,
+            headline_results,
+            f"Focus CPI Groups: y/y Inflation Response to {shock_label} ({shock_path_label})",
+        )
+    else:
+        draw_focus_group_asymmetry_grid(
+            group_results,
+            headline_results,
+            f"Focus CPI Groups: Asymmetric y/y Responses to {shock_label} ({shock_path_label})",
+        )
+
+    st.subheader("FX IRF")
+    if mode_label == "Symmetric":
+        draw_irf_chart(
+            shock_path_results,
+            f"{shock_settings['display']} Response",
+            "Percent log points",
+        )
+    else:
+        draw_asymmetric_irf_chart(
+            shock_path_results,
+            pd.DataFrame(columns=["horizon", "beta"]),
+            f"{shock_settings['display']}: One-Shock Appreciation and Depreciation Paths",
+            "Percent log points",
+        )
+        st.caption(
+            "These are the estimated nominal CHF paths used to build the asymmetric focus-group responses."
+        )
+
+    st.subheader("Results")
+    table_choice = st.radio(
+        "Table",
+        (
+            ["Focus groups", "Contribution decomposition", "Headline reference"]
+            if mode_label == "Symmetric"
+            else ["Maintained focus groups", "Contribution decomposition", "One-shock focus groups", "Headline reference", f"{shock_settings['display']} path"]
+        ),
+        horizontal=True,
+        key="focus_table",
+    )
+    if table_choice in ["Focus groups", "Maintained focus groups"]:
+        table = group_results
+    elif table_choice == "Contribution decomposition":
+        table = contribution_data
+    elif table_choice == "One-shock focus groups":
+        table = one_shock_results
+    elif table_choice == f"{shock_settings['display']} path":
+        table = shock_path_results
+    else:
+        table = headline_results
+    st.dataframe(table, width="stretch", hide_index=True)
+    st.download_button(
+        "Download selected focus-group results",
+        data=table.to_csv(index=False).encode("utf-8"),
+        file_name=f"{table_choice.lower().replace(' ', '_')}_focus_group_lp_results.csv",
+        mime="text/csv",
+    )
+
+
 def render_major_groups_page(data: pd.DataFrame) -> None:
     st.title("Major Groups")
     st.caption(
@@ -2528,6 +3304,8 @@ def main() -> None:
         render_asymmetry_lp_page(data)
     elif page == "Major Groups":
         render_major_groups_page(data)
+    elif page == "Focus Groups":
+        render_focus_groups_page(data)
 
 
 if __name__ == "__main__":
