@@ -34,6 +34,13 @@ SOURCE_ROWS = [
         "Notes": "Nominal effective exchange rate. Higher values mean CHF appreciation.",
     },
     {
+        "Variable": "SNB CHF NEER",
+        "Columns": "snb_chf_neer",
+        "Source": "SNB data portal, devwkieffim, code {N,G,I}",
+        "URL": "https://data.snb.ch/en/topics/ziredev/cube/devwkieffim",
+        "Notes": "Nominal overall effective exchange rate index, December 2000 = 100, monthly average. Higher values mean CHF appreciation.",
+    },
+    {
         "Variable": "EURCHF",
         "Columns": "eur_chf",
         "Source": "ECB Data Portal, EXR.D.CHF.EUR.SP00.A",
@@ -147,6 +154,7 @@ CORE_COLUMNS = [
     "cpi",
     "cpi_sa",
     "chf_neer",
+    "snb_chf_neer",
     "eur_chf",
     "usd_chf",
     "core_cpi_1",
@@ -175,8 +183,8 @@ PRICE_SERIES = {
 }
 
 CONTROL_CHARTS = {
-    "CHF NEER level": (["chf_neer"], "CHF Nominal Effective Exchange Rate", "Index"),
-    "CHF NEER monthly change": (["chf_neer_change"], "CHF NEER Monthly Log Change", "Percent log points"),
+    "BIS vs SNB CHF NEER level": (["chf_neer", "snb_chf_neer"], "BIS vs SNB CHF NEER", "Index, Dec 2019 = 100"),
+    "BIS vs SNB CHF NEER monthly change": (["chf_neer_change", "snb_chf_neer_change"], "BIS vs SNB CHF NEER Monthly Log Change", "Percent log points"),
     "EURCHF level": (["eur_chf"], "EURCHF", "CHF per EUR"),
     "EURCHF monthly change": (["eur_chf_appreciation_change"], "EURCHF Monthly Move", "CHF appreciation, percent log points"),
     "USDCHF level": (["usd_chf"], "USDCHF", "CHF per USD"),
@@ -189,14 +197,24 @@ CONTROL_CHARTS = {
 }
 
 EXCHANGE_RATE_SHOCKS = {
-    "CHF NEER": {
+    "BIS CHF NEER": {
         "level": "chf_neer",
         "log_level": "log_chf_neer_pct",
         "change": "chf_neer_change",
-        "display": "CHF NEER",
-        "level_label": "CHF NEER level",
-        "held_label": "CHF NEER held at +1",
-        "path_label": "Estimated CHF NEER path",
+        "display": "BIS CHF NEER",
+        "level_label": "BIS CHF NEER level",
+        "held_label": "BIS CHF NEER held at +1",
+        "path_label": "Estimated BIS CHF NEER path",
+        "positive_text": "CHF appreciation",
+    },
+    "SNB CHF NEER": {
+        "level": "snb_chf_neer",
+        "log_level": "log_snb_chf_neer_pct",
+        "change": "snb_chf_neer_change",
+        "display": "SNB CHF NEER",
+        "level_label": "SNB CHF NEER level",
+        "held_label": "SNB CHF NEER held at +1",
+        "path_label": "Estimated SNB CHF NEER path",
         "positive_text": "CHF appreciation",
     },
     "EURCHF": {
@@ -233,7 +251,13 @@ LP_RESPONSES = {
     "Imported CPI": {"nsa": "imported", "sa": "imported_sa"},
 }
 
-BASELINE_LP_RESPONSES = ["Headline CPI", "Core CPI 1", "Core CPI 2"]
+BASELINE_LP_RESPONSES = [
+    "Headline CPI",
+    "Core CPI 1",
+    "Core CPI 2",
+    "Fresh and seasonal products",
+    "Energy and fuels CPI",
+]
 
 LP_TRANSFORMS = {
     "y/y inflation": {
@@ -261,10 +285,16 @@ LP_CONTROL_SETS = {
 }
 
 EVENT_PRESETS = {
-    "SNB minimum exchange-rate period": ("2011-09-01", "2015-01-01"),
-    "Floor removal window": ("2015-01-01", "2015-03-01"),
-    "Covid period": ("2020-03-01", "2021-12-01"),
-    "Energy shock period": ("2021-09-01", "2023-12-01"),
+    "Pre-floor and floor introduction, censored": {
+        "start": "2011-07-01",
+        "end": "2012-06-01",
+        "action": "Censor",
+    },
+    "Floor removal year, censored": {
+        "start": "2015-01-01",
+        "end": "2015-12-01",
+        "action": "Censor",
+    },
 }
 
 
@@ -287,6 +317,9 @@ def add_transforms(data: pd.DataFrame) -> pd.DataFrame:
     derived = {}
     derived["log_chf_neer_pct"] = 100 * np.log(out["chf_neer"])
     derived["chf_neer_change"] = 100 * (np.log(out["chf_neer"]) - np.log(out["chf_neer"]).shift(1))
+    if "snb_chf_neer" in out:
+        derived["log_snb_chf_neer_pct"] = 100 * np.log(out["snb_chf_neer"])
+        derived["snb_chf_neer_change"] = 100 * (np.log(out["snb_chf_neer"]) - np.log(out["snb_chf_neer"]).shift(1))
     if "eur_chf" in out:
         derived["log_eur_chf_appreciation_pct"] = -100 * np.log(out["eur_chf"])
         derived["eur_chf_appreciation_change"] = derived["log_eur_chf_appreciation_pct"] - derived[
@@ -381,21 +414,65 @@ def add_event_dummies(data: pd.DataFrame, event_windows: list[dict[str, pd.Times
     out = data.copy()
     dummy_columns = []
     used_names: set[str] = set()
-    for window in event_windows:
-        start = pd.Timestamp(window["start"])
-        end = pd.Timestamp(window["end"])
-        if end < start:
-            start, end = end, start
-        base_name = f"event_{slugify_name(str(window['name']))}"
+
+    def unique_name(base_name: str) -> str:
         name = base_name
         counter = 2
         while name in used_names:
             name = f"{base_name}_{counter}"
             counter += 1
         used_names.add(name)
-        out[name] = ((out["date"] >= start) & (out["date"] <= end)).astype(float)
-        dummy_columns.append(name)
+        return name
+
+    for window in event_windows:
+        start = pd.Timestamp(window["start"])
+        end = pd.Timestamp(window["end"])
+        if end < start:
+            start, end = end, start
+        base_name = f"event_{slugify_name(str(window['name']))}"
+        if window.get("monthly_dummies", False):
+            for period in pd.period_range(start=start, end=end, freq="M"):
+                month = period.to_timestamp()
+                name = unique_name(f"{base_name}_{month:%Y_%m}")
+                out[name] = out["date"].dt.to_period("M").eq(period).astype(float)
+                dummy_columns.append(name)
+        else:
+            name = unique_name(base_name)
+            out[name] = ((out["date"] >= start) & (out["date"] <= end)).astype(float)
+            dummy_columns.append(name)
     return out, dummy_columns
+
+
+def apply_censor_windows(data: pd.DataFrame, censor_windows: list[dict[str, pd.Timestamp]]) -> pd.DataFrame:
+    if not censor_windows:
+        return data
+    keep = pd.Series(True, index=data.index)
+    for window in censor_windows:
+        start = pd.Timestamp(window["start"])
+        end = pd.Timestamp(window["end"])
+        if end < start:
+            start, end = end, start
+        keep &= ~((data["date"] >= start) & (data["date"] <= end))
+    return data.loc[keep].copy()
+
+
+def mask_censored_values(
+    data: pd.DataFrame,
+    censor_windows: list[dict[str, pd.Timestamp]],
+    columns: list[str],
+) -> pd.DataFrame:
+    if not censor_windows:
+        return data
+    out = data.copy()
+    columns = list(dict.fromkeys(column for column in columns if column in out.columns))
+    for window in censor_windows:
+        start = pd.Timestamp(window["start"])
+        end = pd.Timestamp(window["end"])
+        if end < start:
+            start, end = end, start
+        mask = (out["date"] >= start) & (out["date"] <= end)
+        out.loc[mask, columns] = np.nan
+    return out
 
 
 def to_presented_yoy_response(results: pd.DataFrame, transform_label: str) -> pd.DataFrame:
@@ -532,10 +609,16 @@ def run_lp(
     lags: int,
     include_forward_shocks: bool,
     event_windows: list[dict[str, pd.Timestamp]],
+    censor_windows: list[dict[str, pd.Timestamp]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     data = add_transforms(data)
     data, dummy_controls = add_event_dummies(data, event_windows)
     sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    sample = mask_censored_values(
+        sample,
+        censor_windows or [],
+        [response, display_response, price_response, shock_name, shock_level_response, *controls],
+    )
     transform = LP_TRANSFORMS[transform_label]
     display_transform = LP_TRANSFORMS[display_transform_label]
     cpi_config = LPConfig(
@@ -618,10 +701,16 @@ def run_asymmetric_lp(
     lags: int,
     include_forward_shocks: bool,
     event_windows: list[dict[str, pd.Timestamp]],
+    censor_windows: list[dict[str, pd.Timestamp]] | None = None,
 ) -> pd.DataFrame:
     data = add_transforms(data)
     data, dummy_controls = add_event_dummies(data, event_windows)
     sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    sample = mask_censored_values(
+        sample,
+        censor_windows or [],
+        [response, display_response, shock_name, *controls],
+    )
     transform = LP_TRANSFORMS[transform_label]
     display_transform = LP_TRANSFORMS[display_transform_label]
     config = LPConfig(
@@ -1234,6 +1323,56 @@ def draw_line_chart(
     for column in columns:
         if column in plot_data:
             ax.plot(plot_data["date"], plot_data[column], linewidth=1.8, label=column)
+    ax.set_title(title, fontsize=12, pad=12)
+    ax.set_xlabel("")
+    ax.set_ylabel(ylabel)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(True, alpha=0.25)
+    ax.legend(frameon=False, ncols=min(len(columns), 3))
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
+def draw_normalized_line_chart(
+    data: pd.DataFrame,
+    columns: list[str],
+    title: str,
+    ylabel: str,
+    base_date: str,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+    labels: dict[str, str] | None = None,
+) -> None:
+    columns = [column for column in columns if column in data.columns]
+    if not columns:
+        st.info("No available columns for this chart.")
+        return
+
+    base_ts = pd.Timestamp(base_date)
+    full = data.loc[:, ["date", *columns]].copy()
+    base_row = full.loc[full["date"].eq(base_ts), columns]
+    if base_row.empty:
+        st.info(f"Base month {base_ts:%Y-%m} is not available for normalization.")
+        return
+    base_values = base_row.iloc[0].replace(0, np.nan)
+    normalized = full.copy()
+    normalized.loc[:, columns] = 100 * normalized.loc[:, columns] / base_values
+
+    plot_data = normalized.dropna(how="all", subset=columns)
+    if start is not None:
+        plot_data = plot_data.loc[plot_data["date"] >= start]
+    if end is not None:
+        plot_data = plot_data.loc[plot_data["date"] <= end]
+    if plot_data.empty:
+        st.info("No observations in the selected sample window.")
+        return
+
+    labels = labels or {}
+    fig, ax = plt.subplots(figsize=(10.5, 4.6))
+    for column in columns:
+        ax.plot(plot_data["date"], plot_data[column], linewidth=1.8, label=labels.get(column, column))
+    ax.axhline(100, color="#4B5563", linewidth=0.9, linestyle="--", alpha=0.75)
     ax.set_title(title, fontsize=12, pad=12)
     ax.set_xlabel("")
     ax.set_ylabel(ylabel)
@@ -2062,12 +2201,14 @@ def default_spec_label(
     start: pd.Timestamp,
     end: pd.Timestamp,
     event_windows_for_estimation: list[dict[str, pd.Timestamp]],
+    event_windows_for_censoring: list[dict[str, pd.Timestamp]] | None = None,
 ) -> str:
     event_part = f", {len(event_windows_for_estimation)}D" if event_windows_for_estimation else ""
+    censor_part = f", {len(event_windows_for_censoring or [])}C" if event_windows_for_censoring else ""
     fwd = "fwd" if include_forward_shocks else "no fwd"
     return (
         f"{response_label}, {shock_label}, est {transform_label}, disp {display_transform_label}, "
-        f"{controls_label}, {fwd}{event_part}, {start:%Y-%m}-{end:%Y-%m}"
+        f"{controls_label}, {fwd}{event_part}{censor_part}, {start:%Y-%m}-{end:%Y-%m}"
     )
 
 
@@ -2097,6 +2238,82 @@ def equation_text(
         rf" + \sum_{{j=1}}^{{p}} \delta_{{h,j}} \Delta s_{{t-j}}"
         rf"{lagged_control_term} + u_{{t+h}}, \quad p = {lags}"
     )
+
+
+def monthly_options(start: pd.Timestamp, end: pd.Timestamp) -> list[str]:
+    return [period.strftime("%Y-%m") for period in pd.period_range(start=start, end=end, freq="M")]
+
+
+def event_window_label(window: dict) -> str:
+    suffix = " monthly" if window.get("monthly_dummies", False) else ""
+    return f"{window['name']}{suffix}"
+
+
+WINDOW_ACTIONS = ["Period dummy", "Dummy for each month", "Censor"]
+
+
+def apply_window_action(window: dict, action: str) -> dict:
+    out = window.copy()
+    out["treatment"] = "Censor" if action == "Censor" else "Dummy"
+    out["monthly_dummies"] = action == "Dummy for each month"
+    out["action"] = action
+    return out
+
+
+def default_window_action(window: dict) -> str:
+    if window.get("treatment") == "Censor":
+        return "Censor"
+    if window.get("monthly_dummies", False):
+        return "Dummy for each month"
+    return "Period dummy"
+
+
+def event_window_type(window: dict) -> str:
+    treatment = window.get("treatment", "Dummy")
+    if treatment == "Censor":
+        return "Censored observations"
+    return "Separate monthly dummies" if window.get("monthly_dummies", False) else "Block dummy"
+
+
+def event_dummy_column_count(window: dict) -> int:
+    if window.get("treatment", "Dummy") != "Dummy":
+        return 0
+    if window.get("monthly_dummies", False):
+        return len(pd.period_range(window["start"], window["end"], freq="M"))
+    return 1
+
+
+def dummy_windows(event_windows: list[dict]) -> list[dict]:
+    return [window for window in event_windows if window.get("treatment", "Dummy") == "Dummy"]
+
+
+def censor_windows(event_windows: list[dict]) -> list[dict]:
+    return [window for window in event_windows if window.get("treatment") == "Censor"]
+
+
+def event_preset_window(name: str) -> dict:
+    preset = EVENT_PRESETS[name]
+    if isinstance(preset, dict):
+        action = preset.get(
+            "action",
+            "Dummy for each month" if preset.get("monthly_dummies", False) else "Period dummy",
+        )
+        return {
+            "name": name,
+            "start": pd.Timestamp(preset["start"]),
+            "end": pd.Timestamp(preset["end"]),
+            "monthly_dummies": action == "Dummy for each month",
+            "treatment": "Censor" if action == "Censor" else "Dummy",
+            "action": action,
+        }
+    return {
+        "name": name,
+        "start": pd.Timestamp(preset[0]),
+        "end": pd.Timestamp(preset[1]),
+        "monthly_dummies": False,
+        "treatment": "Dummy",
+        "action": "Period dummy",
+    }
 
 
 def sidebar() -> tuple[str, Path]:
@@ -2313,11 +2530,28 @@ def render_data_page(data: pd.DataFrame) -> None:
         chart_choices = st.multiselect(
             "Charts",
             options=list(CONTROL_CHARTS),
-            default=["CHF NEER level", "CHF NEER monthly change", "Euro area core inflation", "Brent oil inflation"],
+            default=[
+                "BIS vs SNB CHF NEER level",
+                "BIS vs SNB CHF NEER monthly change",
+                "Euro area core inflation",
+                "Brent oil inflation",
+            ],
         )
         for chart_choice in chart_choices:
             columns, title, ylabel = CONTROL_CHARTS[chart_choice]
-            draw_line_chart(sample, columns, title, ylabel)
+            if chart_choice == "BIS vs SNB CHF NEER level":
+                draw_normalized_line_chart(
+                    data,
+                    columns,
+                    title,
+                    ylabel,
+                    base_date="2019-12-01",
+                    start=start,
+                    end=end,
+                    labels={"chf_neer": "BIS CHF NEER", "snb_chf_neer": "SNB CHF NEER"},
+                )
+            else:
+                draw_line_chart(sample, columns, title, ylabel)
 
     with tabs[5]:
         st.subheader("Merged Monthly Panel")
@@ -2370,28 +2604,64 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
         lags = col_g.number_input("Lags", min_value=1, max_value=24, value=12, step=1)
 
     with st.expander("Period Dummies and Event Windows", expanded=False):
+        month_options = monthly_options(pd.Timestamp(min_date), pd.Timestamp(max_date))
         selected_presets = st.multiselect(
             "Preset windows",
             options=list(EVENT_PRESETS),
             default=[],
         )
+        preset_windows = []
+        for name in selected_presets:
+            preset_window = event_preset_window(name)
+            action = st.selectbox(
+                f"{name} action",
+                WINDOW_ACTIONS,
+                index=WINDOW_ACTIONS.index(default_window_action(preset_window)),
+                key=f"preset_action_{slugify_name(name)}",
+            )
+            preset_windows.append(apply_window_action(preset_window, action))
         custom_count = st.number_input("Custom windows", min_value=0, max_value=3, value=0, step=1)
         custom_windows = []
         for idx in range(int(custom_count)):
-            col_a, col_b, col_c = st.columns([1.4, 1, 1])
+            col_a, col_b, col_c, col_d = st.columns([1.4, 1, 1, 1.2])
             custom_name = col_a.text_input("Name", value=f"Custom window {idx + 1}", key=f"custom_event_name_{idx}")
-            custom_start = col_b.date_input("Start", value=min_date.date(), key=f"custom_event_start_{idx}")
-            custom_end = col_c.date_input("End", value=min_date.date(), key=f"custom_event_end_{idx}")
-            custom_windows.append({"name": custom_name, "start": pd.Timestamp(custom_start), "end": pd.Timestamp(custom_end)})
-        include_event_dummies = st.checkbox("Include selected windows as contemporaneous dummies", value=True)
-        st.caption("Selected windows are shaded in the sample preview. If included, they enter as D_t, not with lags.")
+            custom_start = col_b.selectbox(
+                "Start",
+                options=month_options,
+                index=0,
+                key=f"custom_event_start_{idx}",
+            )
+            custom_end = col_c.selectbox(
+                "End",
+                options=month_options,
+                index=0,
+                key=f"custom_event_end_{idx}",
+            )
+            action = col_d.selectbox(
+                "Action",
+                WINDOW_ACTIONS,
+                index=0,
+                key=f"custom_event_action_{idx}",
+            )
+            custom_windows.append(
+                apply_window_action(
+                    {
+                        "name": custom_name,
+                        "start": pd.Timestamp(custom_start),
+                        "end": pd.Timestamp(custom_end),
+                    },
+                    action,
+                )
+            )
+        st.caption(
+            "`Period dummy` adds one D_t control for the full range. `Dummy for each month` adds one D_t control per selected month. "
+            "`Censor` drops the selected months from estimation."
+        )
 
-    event_windows = [
-        {"name": name, "start": pd.Timestamp(EVENT_PRESETS[name][0]), "end": pd.Timestamp(EVENT_PRESETS[name][1])}
-        for name in selected_presets
-    ]
+    event_windows = preset_windows
     event_windows.extend(custom_windows)
-    event_windows_for_estimation = event_windows if include_event_dummies else []
+    event_windows_for_estimation = dummy_windows(event_windows)
+    event_windows_for_censoring = censor_windows(event_windows)
 
     start = pd.Timestamp(selected_dates[0])
     end = pd.Timestamp(selected_dates[1])
@@ -2406,6 +2676,10 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
     price_response = response_column(base_response, "Cumulative price difference")
     controls = [control for control in LP_CONTROL_SETS[controls_label] if control in data.columns]
     sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    sample_after_censoring = apply_censor_windows(sample, event_windows_for_censoring)
+    if sample_after_censoring.empty:
+        st.error("The selected censor windows remove the entire estimation sample. Shorten the censor range or choose a dummy action.")
+        st.stop()
 
     st.subheader("Estimated Equation")
     equation_symbol = LP_TRANSFORMS[transform_label]["equation_label"]
@@ -2451,8 +2725,10 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
     else:
         st.caption("Controls in Z: none.")
     if event_windows_for_estimation:
-        st.caption("Period dummies in D: " + ", ".join(window["name"] for window in event_windows_for_estimation) + ".")
-    elif event_windows:
+        st.caption("Period dummies in D: " + ", ".join(event_window_label(window) for window in event_windows_for_estimation) + ".")
+    if event_windows_for_censoring:
+        st.caption("Censored windows are excluded from estimation: " + ", ".join(event_window_label(window) for window in event_windows_for_censoring) + ".")
+    if event_windows and not event_windows_for_estimation and not event_windows_for_censoring:
         st.caption("Selected period windows are shaded but not included as controls.")
 
     cpi_results, chf_results, price_results, reer_results = run_lp(
@@ -2473,6 +2749,7 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
         lags=int(lags),
         include_forward_shocks=include_forward_shocks,
         event_windows=event_windows_for_estimation,
+        censor_windows=event_windows_for_censoring,
     )
     if use_layered_shocks:
         cpi_results = maintained_response_from_irfs(
@@ -2488,9 +2765,9 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
         reer_results = implied_reer_response(price_results, chf_results, include_forward_shocks=True)
 
     col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("Rows in sample", f"{len(sample):,}")
-    col_b.metric("First month", sample["date"].min().strftime("%Y-%m"))
-    col_c.metric("Last month", sample["date"].max().strftime("%Y-%m"))
+    col_a.metric("Rows after censoring", f"{len(sample_after_censoring):,}", delta=f"{len(sample_after_censoring) - len(sample):,}")
+    col_b.metric("First month", sample_after_censoring["date"].min().strftime("%Y-%m"))
+    col_c.metric("Last month", sample_after_censoring["date"].max().strftime("%Y-%m"))
     col_d.metric("FX path", fx_path_label)
 
     if event_windows:
@@ -2499,14 +2776,25 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
         st.dataframe(
             pd.DataFrame(
                 {
-                    "window": [window["name"] for window in event_windows],
+                    "window": [event_window_label(window) for window in event_windows],
                     "start": [pd.Timestamp(window["start"]).date() for window in event_windows],
                     "end": [pd.Timestamp(window["end"]).date() for window in event_windows],
-                    "included_as_dummy": [window in event_windows_for_estimation for window in event_windows],
+                    "treatment": [event_window_type(window) for window in event_windows],
+                    "dummy_columns": [event_dummy_column_count(window) for window in event_windows],
+                    "censored_months": [
+                        len(pd.period_range(window["start"], window["end"], freq="M"))
+                        if window.get("treatment") == "Censor"
+                        else 0
+                        for window in event_windows
+                    ],
                 }
             ),
             width="stretch",
             hide_index=True,
+        )
+        st.caption(
+            "Shaded ranges show selected windows. `Block dummy` and `Separate monthly dummies` keep observations and add controls. "
+            "`Censored observations` are dropped from the estimation sample."
         )
 
     chart_a, chart_b = st.columns(2)
@@ -2552,6 +2840,7 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
         start=start,
         end=end,
         event_windows_for_estimation=event_windows_for_estimation,
+        event_windows_for_censoring=event_windows_for_censoring,
     )
     default_label = f"{default_label}, {seasonal_adjustment}, {fx_path_label}"
     col_add, col_clear = st.columns([3, 1])
@@ -2572,7 +2861,8 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
                 "controls": controls_label,
                 "forward_shocks": include_forward_shocks,
                 "sample": f"{start:%Y-%m} to {end:%Y-%m}",
-                "dummies": ", ".join(window["name"] for window in event_windows_for_estimation) or "none",
+                "dummies": ", ".join(event_window_label(window) for window in event_windows_for_estimation) or "none",
+                "censored": ", ".join(event_window_label(window) for window in event_windows_for_censoring) or "none",
             }
         )
         st.success(f"Added: {spec_label}")
@@ -2598,11 +2888,12 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
                         "estimated": spec["estimated"],
                         "displayed": spec["displayed"],
                         "index": spec.get("index", ""),
-                        "shock": spec.get("shock", "CHF NEER"),
+                        "shock": spec.get("shock", "BIS CHF NEER"),
                         "fx_path": spec.get("fx_path", "Forward shocks" if spec.get("forward_shocks", False) else "Standard"),
                         "controls": spec["controls"],
                         "sample": spec["sample"],
                         "dummies": spec["dummies"],
+                        "censored": spec.get("censored", "none"),
                     }
                     for spec in selected_specs
                 ]
@@ -2673,36 +2964,69 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
         lags = col_i.number_input("Lags", min_value=1, max_value=24, value=6, step=1)
 
     with st.expander("Period Dummies and Event Windows", expanded=False):
+        month_options = monthly_options(pd.Timestamp(min_date), pd.Timestamp(max_date))
         selected_presets = st.multiselect(
             "Preset windows",
             options=list(EVENT_PRESETS),
             default=[],
             key="asym_event_presets",
         )
+        preset_windows = []
+        for name in selected_presets:
+            preset_window = event_preset_window(name)
+            action = st.selectbox(
+                f"{name} action",
+                WINDOW_ACTIONS,
+                index=WINDOW_ACTIONS.index(default_window_action(preset_window)),
+                key=f"asym_preset_action_{slugify_name(name)}",
+            )
+            preset_windows.append(apply_window_action(preset_window, action))
         custom_count = st.number_input("Custom windows", min_value=0, max_value=3, value=0, step=1, key="asym_custom_count")
         custom_windows = []
         for idx in range(int(custom_count)):
-            col_a, col_b, col_c = st.columns([1.4, 1, 1])
+            col_a, col_b, col_c, col_d = st.columns([1.4, 1, 1, 1.2])
             custom_name = col_a.text_input(
                 "Name",
                 value=f"Custom window {idx + 1}",
                 key=f"asym_custom_event_name_{idx}",
             )
-            custom_start = col_b.date_input("Start", value=min_date.date(), key=f"asym_custom_event_start_{idx}")
-            custom_end = col_c.date_input("End", value=min_date.date(), key=f"asym_custom_event_end_{idx}")
-            custom_windows.append({"name": custom_name, "start": pd.Timestamp(custom_start), "end": pd.Timestamp(custom_end)})
-        include_event_dummies = st.checkbox(
-            "Include selected windows as contemporaneous dummies",
-            value=True,
-            key="asym_include_event_dummies",
+            custom_start = col_b.selectbox(
+                "Start",
+                options=month_options,
+                index=0,
+                key=f"asym_custom_event_start_{idx}",
+            )
+            custom_end = col_c.selectbox(
+                "End",
+                options=month_options,
+                index=0,
+                key=f"asym_custom_event_end_{idx}",
+            )
+            action = col_d.selectbox(
+                "Action",
+                WINDOW_ACTIONS,
+                index=0,
+                key=f"asym_custom_event_action_{idx}",
+            )
+            custom_windows.append(
+                apply_window_action(
+                    {
+                        "name": custom_name,
+                        "start": pd.Timestamp(custom_start),
+                        "end": pd.Timestamp(custom_end),
+                    },
+                    action,
+                )
+            )
+        st.caption(
+            "`Period dummy` adds one D_t control for the full range. `Dummy for each month` adds one D_t control per selected month. "
+            "`Censor` drops the selected months from estimation."
         )
 
-    event_windows = [
-        {"name": name, "start": pd.Timestamp(EVENT_PRESETS[name][0]), "end": pd.Timestamp(EVENT_PRESETS[name][1])}
-        for name in selected_presets
-    ]
+    event_windows = preset_windows
     event_windows.extend(custom_windows)
-    event_windows_for_estimation = event_windows if include_event_dummies else []
+    event_windows_for_estimation = dummy_windows(event_windows)
+    event_windows_for_censoring = censor_windows(event_windows)
 
     start = pd.Timestamp(selected_dates[0])
     end = pd.Timestamp(selected_dates[1])
@@ -2715,6 +3039,10 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
     price_response = response_column(base_response, "Cumulative price difference")
     controls = [control for control in LP_CONTROL_SETS[controls_label] if control in data.columns]
     sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    sample_after_censoring = apply_censor_windows(sample, event_windows_for_censoring)
+    if sample_after_censoring.empty:
+        st.error("The selected censor windows remove the entire estimation sample. Shorten the censor range or choose a dummy action.")
+        st.stop()
 
     st.subheader("Estimated Equation")
     equation_symbol = LP_TRANSFORMS[transform_label]["equation_label"]
@@ -2735,6 +3063,8 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
         "Forward CHF shocks are excluded on this page. The maintained-path chart layers the estimated one-shock IRFs so the nominal CHF path stays at 1%."
     )
     st.caption("Confidence intervals are approximate 90% HAC intervals; maintained-path bands ignore uncertainty in the estimated exchange-rate layering weights.")
+    if event_windows_for_censoring:
+        st.caption("Censored windows are excluded from estimation: " + ", ".join(event_window_label(window) for window in event_windows_for_censoring) + ".")
 
     response_results = run_asymmetric_lp(
         data=data,
@@ -2751,6 +3081,7 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
         lags=int(lags),
         include_forward_shocks=False,
         event_windows=event_windows_for_estimation,
+        censor_windows=event_windows_for_censoring,
     )
     shock_path_results = run_asymmetric_lp(
         data=data,
@@ -2767,6 +3098,7 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
         lags=int(lags),
         include_forward_shocks=False,
         event_windows=event_windows_for_estimation,
+        censor_windows=event_windows_for_censoring,
     )
     maintained_results = build_maintained_asymmetry_results(response_results, shock_path_results)
     symmetric_results, symmetric_chf_results, _, _ = run_lp(
@@ -2787,6 +3119,7 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
         lags=int(lags),
         include_forward_shocks=False,
         event_windows=event_windows_for_estimation,
+        censor_windows=event_windows_for_censoring,
     )
     symmetric_maintained_results = maintained_response_from_irfs(
         symmetric_results,
@@ -2799,14 +3132,37 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
     )
 
     col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("Rows in sample", f"{len(sample):,}")
-    col_b.metric("First month", sample["date"].min().strftime("%Y-%m"))
-    col_c.metric("Last month", sample["date"].max().strftime("%Y-%m"))
+    col_a.metric("Rows after censoring", f"{len(sample_after_censoring):,}", delta=f"{len(sample_after_censoring) - len(sample):,}")
+    col_b.metric("First month", sample_after_censoring["date"].min().strftime("%Y-%m"))
+    col_c.metric("Last month", sample_after_censoring["date"].max().strftime("%Y-%m"))
     col_d.metric("Forward shocks", "No")
 
     if event_windows:
         st.subheader("Sample Preview")
         draw_sample_preview_chart(sample, response, shock_name, event_windows)
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "window": [event_window_label(window) for window in event_windows],
+                    "start": [pd.Timestamp(window["start"]).date() for window in event_windows],
+                    "end": [pd.Timestamp(window["end"]).date() for window in event_windows],
+                    "treatment": [event_window_type(window) for window in event_windows],
+                    "dummy_columns": [event_dummy_column_count(window) for window in event_windows],
+                    "censored_months": [
+                        len(pd.period_range(window["start"], window["end"], freq="M"))
+                        if window.get("treatment") == "Censor"
+                        else 0
+                        for window in event_windows
+                    ],
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption(
+            "Shaded ranges show selected windows. `Block dummy` and `Separate monthly dummies` keep observations and add controls. "
+            "`Censored observations` are dropped from the estimation sample."
+        )
 
     st.subheader("Maintained 1% CHF Move")
     draw_maintained_asymmetry_chart(

@@ -29,6 +29,7 @@ SNB_CUBE_EXPORT_URL = "https://data.snb.ch/json/file/cube"
 SNB_UNEMPLOYMENT_CUBE_ID = "amarbma"
 SNB_UNEMPLOYMENT_SERIES_CODE = "S1"
 SNB_CPI_CUBE_ID = "plkoprex"
+SNB_EFFECTIVE_EXCHANGE_RATE_CUBE_ID = "devwkieffim"
 SNB_PRODUCT_TYPE_ORIGIN_CUBE_ID = "plkoprart"
 SNB_MAJOR_GROUP_CUBE_ID = "plkoprgru"
 SNB_CORE1_SERIES_CODE = "K1"
@@ -258,6 +259,38 @@ def fetch_snb_cube_series_map(cube_id: str, series_map: list[tuple[str, str]]) -
     return merged.sort_values("date").reset_index(drop=True)
 
 
+def fetch_snb_effective_exchange_rate_index(
+    d0: str = "N",
+    d1: str = "G",
+    d2: str = "I",
+    value_name: str = "snb_chf_neer",
+) -> pd.DataFrame:
+    query = {
+        "fileType": "CSV",
+        "lang": "en",
+        "isWarehouse": "false",
+        "cubeId": SNB_EFFECTIVE_EXCHANGE_RATE_CUBE_ID,
+        **fetch_snb_application_properties(),
+    }
+    request = Request(
+        f"{SNB_CUBE_EXPORT_URL}?{urlencode(query)}",
+        data=json.dumps({"getAllData": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request) as response:
+        raw_csv = response.read().decode("utf-8-sig")
+
+    df = pd.read_csv(io.StringIO(raw_csv), sep=";", quotechar='"', skiprows=3)
+    df.columns = [column.strip('"') for column in df.columns]
+    df = df.rename(columns={"Date": "date", "Value": value_name})
+    mask = df["D0"].eq(d0) & df["D1"].eq(d1) & df["D2"].eq(d2)
+    out = df.loc[mask, ["date", value_name]].copy()
+    out["date"] = pd.to_datetime(out["date"], format="%Y-%m")
+    out[value_name] = pd.to_numeric(out[value_name], errors="coerce")
+    return out.dropna(subset=[value_name]).sort_values("date").reset_index(drop=True)
+
+
 def fetch_ch_unemployment_monthly() -> pd.DataFrame:
     return fetch_snb_cube_series(
         cube_id=SNB_UNEMPLOYMENT_CUBE_ID,
@@ -317,6 +350,7 @@ def build_real_dataset(
     cpi = fetch_bfs_cpi_series(base_name=cpi_base_name)
     cpi = seasonally_adjust_index(cpi, "cpi", "cpi_sa")
     chf_neer = fetch_bis_neer_series(basket=neer_basket)
+    snb_chf_neer = fetch_snb_effective_exchange_rate_index()
     eurchf = fetch_eurchf_monthly()
     usdchf = fetch_usdchf_monthly()
     brent = fetch_brent_monthly()
@@ -330,6 +364,7 @@ def build_real_dataset(
 
     merged = cpi.merge(chf_neer, on="date", how="inner")
     for add_on in (
+        snb_chf_neer,
         eurchf,
         usdchf,
         brent,
