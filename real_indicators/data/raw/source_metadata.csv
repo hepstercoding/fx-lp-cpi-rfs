@@ -1,0 +1,9 @@
+variable,columns,source,url,notes
+Swiss real GDP and components,SECO structure codes plus *_log_level and *_growth_* transforms,SECO machine-readable quarterly national accounts,https://scheduler.swissdatas.ch/scheduled/ch-seco-gdp.csv,"Filtered to type=real and seas_adj=cssa: seasonally, calendar and sports event adjusted."
+CHF NEER,"chf_neer, chf_neer_appreciation_qoq",BIS effective exchange rates,https://data.bis.org/topics/EER,Monthly nominal broad basket averaged to quarters; higher values mean CHF appreciation.
+EURCHF,"eur_chf, eur_chf_appreciation_qoq","ECB Data Portal, EXR.D.CHF.EUR.SP00.A",https://data.ecb.europa.eu/,Monthly average of daily CHF per EUR; transformed so positive change means CHF appreciation.
+USDCHF,"usd_chf, usd_chf_appreciation_qoq",FRED daily USDCHF series DEXSZUS,https://fred.stlouisfed.org/series/DEXSZUS,"Daily CHF per USD averaged to months, then quarters; transformed so positive change means CHF appreciation."
+SNB CHF NEER,"snb_chf_neer, snb_chf_neer_appreciation_qoq","SNB data portal cube devwkieffim, code {N,G,I}",https://data.snb.ch/en/topics/ziredev/cube/devwkieffim,"Nominal overall effective exchange-rate index, December 2000 = 100, monthly average; higher values mean CHF appreciation."
+Euro area real GDP,"ea_real_gdp, ea_real_gdp_growth_qoq","FRED, Eurostat euro-area real GDP series CLV10MNACB1GQSCAEA20Q",https://fred.stlouisfed.org/series/CLV10MNACB1GQSCAEA20Q,"Quarterly chain-linked euro area GDP, used as foreign-demand control."
+Brent oil,brent_oil_change_qoq,FRED daily Brent series DCOILBRENTEU,https://fred.stlouisfed.org/series/DCOILBRENTEU,"Daily prices averaged to quarters, then log-differenced."
+SNB output gap,"snb_output_gap, snb_output_gap_hp, snb_output_gap_multivariate",SNB data portal chart snbprodluch,https://data.snb.ch/en/topics/snb/chart/snbprodluch,Baseline column uses the production-function estimate; HP and multivariate variants are retained.

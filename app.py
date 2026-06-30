@@ -18,7 +18,7 @@ if str(SRC_DIR) not in sys.path:
 from cpi_lp_chf.local_projections import LPConfig, estimate_asymmetric_dashboard_lp, estimate_dashboard_lp
 
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "swiss_macro_real.csv"
-REAL_INDICATOR_PROJECT_ROOT = PROJECT_ROOT.parent / "gdp-local-projections-chf"
+REAL_INDICATOR_PROJECT_ROOT = PROJECT_ROOT / "real_indicators"
 REAL_INDICATOR_APP_PATH = REAL_INDICATOR_PROJECT_ROOT / "app.py"
 
 SOURCE_ROWS = [
