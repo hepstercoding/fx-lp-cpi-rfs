@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 import sys
 
@@ -17,6 +18,8 @@ if str(SRC_DIR) not in sys.path:
 from cpi_lp_chf.local_projections import LPConfig, estimate_asymmetric_dashboard_lp, estimate_dashboard_lp
 
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "swiss_macro_real.csv"
+REAL_INDICATOR_PROJECT_ROOT = PROJECT_ROOT.parent / "gdp-local-projections-chf"
+REAL_INDICATOR_APP_PATH = REAL_INDICATOR_PROJECT_ROOT / "app.py"
 
 SOURCE_ROWS = [
     {
@@ -310,6 +313,32 @@ def load_data(path: str, file_mtime: float | None = None) -> pd.DataFrame:
     data = pd.read_csv(path, parse_dates=["date"])
     data = data.sort_values("date").reset_index(drop=True)
     return add_transforms(data)
+
+
+@st.cache_resource(show_spinner=False)
+def load_real_indicator_app():
+    if not REAL_INDICATOR_APP_PATH.exists():
+        return None
+    original_set_page_config = st.set_page_config
+    st.set_page_config = lambda *args, **kwargs: None
+    try:
+        spec = importlib.util.spec_from_file_location("real_indicator_dashboard_app", REAL_INDICATOR_APP_PATH)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["real_indicator_dashboard_app"] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        st.set_page_config = original_set_page_config
+
+
+def real_indicator_module_or_stop():
+    module = load_real_indicator_app()
+    if module is None:
+        st.error(f"Real indicator dashboard app not found: {REAL_INDICATOR_APP_PATH}")
+        st.stop()
+    return module
 
 
 def add_transforms(data: pd.DataFrame) -> pd.DataFrame:
@@ -1533,6 +1562,42 @@ def draw_comparison_chart(specs: list[dict], title: str, ylabel: str) -> None:
     st.pyplot(fig, clear_figure=True)
 
 
+def draw_fx_comparison_chart(specs: list[dict], title: str, ylabel: str) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    ax.axhline(0, color="#4B5563", linewidth=1)
+    colors = {
+        "+1pp CHF appreciation": "#0F766E",
+        "-1 x 1pp CHF depreciation": "#B45309",
+        "Maintained +1% CHF appreciation": "#0F766E",
+        "-1 x maintained 1% CHF depreciation": "#B45309",
+    }
+    for spec in specs:
+        results = spec["results"].dropna(subset=["beta"]).copy()
+        if results.empty:
+            continue
+        if "shock_component" not in results:
+            ax.plot(results["horizon"], results["beta"], linewidth=2, label=spec["label"])
+            continue
+        for component, group in results.groupby("shock_component", sort=False):
+            color = colors.get(component)
+            ax.plot(
+                group["horizon"],
+                group["beta"],
+                linewidth=2,
+                color=color,
+                label=f"{spec['label']}: {component}",
+            )
+    ax.set_title(title, fontsize=12, pad=12)
+    ax.set_xlabel("Months after CHF shock")
+    ax.set_ylabel(ylabel)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(True, alpha=0.25)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
 def draw_asymmetric_irf_chart(
     asymmetric_results: pd.DataFrame,
     symmetric_results: pd.DataFrame,
@@ -2218,6 +2283,13 @@ def comparison_store() -> list[dict]:
     return st.session_state.lp_comparison_specs
 
 
+def named_comparison_store(name: str) -> list[dict]:
+    key = f"{name}_comparison_specs"
+    if key not in st.session_state:
+        st.session_state[key] = []
+    return st.session_state[key]
+
+
 def equation_text(
     response_label: str,
     transform_label: str,
@@ -2318,11 +2390,35 @@ def event_preset_window(name: str) -> dict:
 
 def sidebar() -> tuple[str, Path]:
     st.sidebar.title("CPI LP Dashboard")
-    page = st.sidebar.radio(
-        "Page",
-        ["Baseline LP", "Asymmetry LP", "Major Groups", "Focus Groups", "Data", "Methodology"],
-        index=0,
-    )
+    pages = [
+        "FX IRF",
+        "Baseline LP",
+        "Asymmetry LP",
+        "Major Groups",
+        "Focus Groups",
+        "Data",
+        "Methodology",
+        "GDP LP",
+        "Unemployment LP",
+        "Real Indicator Data Audit",
+    ]
+    if "sidebar_page" not in st.session_state or st.session_state.sidebar_page not in pages:
+        st.session_state.sidebar_page = "FX IRF"
+
+    def nav_button(label: str) -> None:
+        button_type = "primary" if st.session_state.sidebar_page == label else "secondary"
+        if st.sidebar.button(label, type=button_type, width="stretch", key=f"nav_{slugify_name(label)}"):
+            st.session_state.sidebar_page = label
+
+    nav_button("FX IRF")
+    st.sidebar.markdown("### CPI")
+    for label in ["Baseline LP", "Asymmetry LP", "Major Groups", "Focus Groups", "Data", "Methodology"]:
+        nav_button(label)
+    st.sidebar.markdown("### Real Variables")
+    for label in ["GDP LP", "Unemployment LP", "Real Indicator Data Audit"]:
+        nav_button(label)
+
+    page = st.session_state.sidebar_page
     data_path_text = st.sidebar.text_input("Data file", str(DEFAULT_DATA_PATH))
     return page, Path(data_path_text).expanduser()
 
@@ -3226,6 +3322,357 @@ def render_asymmetry_lp_page(data: pd.DataFrame) -> None:
     )
 
 
+def render_fx_irf_page(data: pd.DataFrame) -> None:
+    st.title("FX IRF")
+    st.caption(
+        "Exchange-rate response to the selected CHF shock. The page follows the baseline LP controls "
+        "and estimates either a symmetric or sign-split one-shock FX persistence path."
+    )
+
+    min_date = data["date"].min().to_pydatetime()
+    max_date = data["date"].max().to_pydatetime()
+
+    with st.container(border=True):
+        col_a, col_b, col_c = st.columns([1.05, 1.05, 1.15])
+        available_shocks = available_exchange_rate_shocks(data)
+        shock_label = col_a.selectbox("CHF shock", available_shocks, index=0, key="fx_irf_shock")
+        mode_label = col_b.selectbox("Mode", ["Symmetric", "Asymmetry"], index=0, key="fx_irf_mode")
+        controls_label = col_c.selectbox("Controls", list(LP_CONTROL_SETS), index=1, key="fx_irf_controls")
+
+        col_e, col_f, col_g = st.columns([1.6, 1, 1])
+        selected_dates = col_e.slider(
+            "Estimation range",
+            min_value=min_date,
+            max_value=max_date,
+            value=(min_date, max_date),
+            format="YYYY-MM",
+            key="fx_irf_range",
+        )
+        horizons = col_f.number_input("Horizon", min_value=1, max_value=60, value=36, step=1, key="fx_irf_horizon")
+        lags = col_g.number_input("Lags", min_value=1, max_value=24, value=12, step=1, key="fx_irf_lags")
+
+    with st.expander("Period Dummies and Event Windows", expanded=False):
+        month_options = monthly_options(pd.Timestamp(min_date), pd.Timestamp(max_date))
+        selected_presets = st.multiselect(
+            "Preset windows",
+            options=list(EVENT_PRESETS),
+            default=[],
+            key="fx_irf_event_presets",
+        )
+        preset_windows = []
+        for name in selected_presets:
+            preset_window = event_preset_window(name)
+            action = st.selectbox(
+                f"{name} action",
+                WINDOW_ACTIONS,
+                index=WINDOW_ACTIONS.index(default_window_action(preset_window)),
+                key=f"fx_irf_preset_action_{slugify_name(name)}",
+            )
+            preset_windows.append(apply_window_action(preset_window, action))
+        custom_count = st.number_input("Custom windows", min_value=0, max_value=3, value=0, step=1, key="fx_irf_custom_count")
+        custom_windows = []
+        for idx in range(int(custom_count)):
+            col_a, col_b, col_c, col_d = st.columns([1.4, 1, 1, 1.2])
+            custom_name = col_a.text_input(
+                "Name",
+                value=f"Custom window {idx + 1}",
+                key=f"fx_irf_custom_event_name_{idx}",
+            )
+            custom_start = col_b.selectbox("Start", options=month_options, index=0, key=f"fx_irf_custom_event_start_{idx}")
+            custom_end = col_c.selectbox("End", options=month_options, index=0, key=f"fx_irf_custom_event_end_{idx}")
+            action = col_d.selectbox("Action", WINDOW_ACTIONS, index=0, key=f"fx_irf_custom_event_action_{idx}")
+            custom_windows.append(
+                apply_window_action(
+                    {"name": custom_name, "start": pd.Timestamp(custom_start), "end": pd.Timestamp(custom_end)},
+                    action,
+                )
+            )
+        st.caption(
+            "`Period dummy` adds one D_t control for the full range. `Dummy for each month` adds one D_t control per selected month. "
+            "`Censor` drops the selected months from estimation."
+        )
+
+    event_windows = preset_windows
+    event_windows.extend(custom_windows)
+    event_windows_for_estimation = dummy_windows(event_windows)
+    event_windows_for_censoring = censor_windows(event_windows)
+
+    start = pd.Timestamp(selected_dates[0])
+    end = pd.Timestamp(selected_dates[1])
+    shock_settings = EXCHANGE_RATE_SHOCKS[shock_label]
+    shock_name = shock_settings["change"]
+    shock_level_response = shock_settings["log_level"]
+    controls = [control for control in LP_CONTROL_SETS[controls_label] if control in data.columns]
+    sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    sample_after_censoring = apply_censor_windows(sample, event_windows_for_censoring)
+    if sample_after_censoring.empty:
+        st.error("The selected censor windows remove the entire estimation sample. Shorten the censor range or choose a dummy action.")
+        st.stop()
+
+    st.subheader("Estimated Equation")
+    dummy_term = r" + \kappa_h' D_t" if event_windows_for_estimation else ""
+    control_term = r" + \theta_h' Z_t" if controls else ""
+    lagged_control_term = r" + \sum_{j=1}^{p} \eta_{h,j}' Z_{t-j}" if controls else ""
+    if mode_label == "Symmetric":
+        st.latex(
+            rf"\Delta_h s_{{t+h}} = \alpha_h + \beta_h \Delta s_t"
+            f"{control_term}{dummy_term}"
+            rf" + \sum_{{j=1}}^{{p}} \gamma_{{h,j}}\Delta_h s_{{t-j}}"
+            rf" + \sum_{{j=1}}^{{p}} \delta_{{h,j}}\Delta s_{{t-j}}"
+            rf"{lagged_control_term} + u_{{t+h}}, \quad p = {int(lags)}"
+        )
+    else:
+        st.latex(
+            rf"\Delta_h s_{{t+h}} = \alpha_h + \beta_h^+ \Delta s_t^+ + \beta_h^- \Delta s_t^-"
+            f"{control_term}{dummy_term}"
+            rf" + \sum_{{j=1}}^{{p}} \gamma_{{h,j}}\Delta_h s_{{t-j}}"
+            rf" + \sum_{{j=1}}^{{p}} \left(\delta_{{h,j}}^+ \Delta s_{{t-j}}^+ + \delta_{{h,j}}^- \Delta s_{{t-j}}^-\right)"
+            rf"{lagged_control_term} + u_{{t+h}}, \quad p = {int(lags)}"
+        )
+        st.latex(r"\Delta s_t^+ = \max(\Delta s_t, 0), \qquad \Delta s_t^- = -\min(\Delta s_t, 0)")
+    st.caption(
+        f"Delta s is the monthly {shock_label} log move, with positive values meaning {shock_settings['positive_text']}. "
+        "The dependent variable is the cumulative log level of the same selected exchange-rate measure."
+    )
+    st.caption("The chart shows the estimated one-shock exchange-rate persistence path; no maintained-path construction is imposed.")
+    if controls:
+        st.caption(f"Controls in Z: {', '.join(controls)}.")
+    else:
+        st.caption("Controls in Z: none.")
+    if event_windows_for_estimation:
+        st.caption("Period dummies in D: " + ", ".join(event_window_label(window) for window in event_windows_for_estimation) + ".")
+    if event_windows_for_censoring:
+        st.caption("Censored windows are excluded from estimation: " + ", ".join(event_window_label(window) for window in event_windows_for_censoring) + ".")
+
+    if mode_label == "Symmetric":
+        fx_results, _, _, _ = run_lp(
+            data=data,
+            response=shock_level_response,
+            display_response=shock_level_response,
+            price_response=shock_level_response,
+            response_label=shock_settings["level_label"],
+            transform_label="Cumulative price difference",
+            display_transform_label="Cumulative price difference",
+            controls=controls,
+            shock_name=shock_name,
+            shock_level_response=shock_level_response,
+            shock_response_label=shock_settings["level_label"],
+            start=start,
+            end=end,
+            horizons=int(horizons),
+            lags=int(lags),
+            include_forward_shocks=False,
+            event_windows=event_windows_for_estimation,
+            censor_windows=event_windows_for_censoring,
+        )
+
+        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a.metric("Rows after censoring", f"{len(sample_after_censoring):,}", delta=f"{len(sample_after_censoring) - len(sample):,}")
+        col_b.metric("First month", sample_after_censoring["date"].min().strftime("%Y-%m"))
+        col_c.metric("Last month", sample_after_censoring["date"].max().strftime("%Y-%m"))
+        col_d.metric("Mode", mode_label)
+
+        draw_irf_chart(fx_results, f"{shock_settings['display']}: Symmetric FX IRF", "Percent log points")
+        table = fx_results
+    else:
+        one_shock_results = run_asymmetric_lp(
+            data=data,
+            response=shock_level_response,
+            display_response=shock_level_response,
+            response_label=shock_settings["level_label"],
+            transform_label="Cumulative price difference",
+            display_transform_label="Cumulative price difference",
+            controls=controls,
+            shock_name=shock_name,
+            start=start,
+            end=end,
+            horizons=int(horizons),
+            lags=int(lags),
+            include_forward_shocks=False,
+            event_windows=event_windows_for_estimation,
+            censor_windows=event_windows_for_censoring,
+        )
+        symmetric_results, _, _, _ = run_lp(
+            data=data,
+            response=shock_level_response,
+            display_response=shock_level_response,
+            price_response=shock_level_response,
+            response_label=shock_settings["level_label"],
+            transform_label="Cumulative price difference",
+            display_transform_label="Cumulative price difference",
+            controls=controls,
+            shock_name=shock_name,
+            shock_level_response=shock_level_response,
+            shock_response_label=shock_settings["level_label"],
+            start=start,
+            end=end,
+            horizons=int(horizons),
+            lags=int(lags),
+            include_forward_shocks=False,
+            event_windows=event_windows_for_estimation,
+            censor_windows=event_windows_for_censoring,
+        )
+        displayed_results = one_shock_results
+
+        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a.metric("Rows after censoring", f"{len(sample_after_censoring):,}", delta=f"{len(sample_after_censoring) - len(sample):,}")
+        col_b.metric("First month", sample_after_censoring["date"].min().strftime("%Y-%m"))
+        col_c.metric("Last month", sample_after_censoring["date"].max().strftime("%Y-%m"))
+        col_d.metric("Mode", mode_label)
+
+        draw_asymmetric_irf_chart(
+            displayed_results,
+            symmetric_results,
+            f"{shock_settings['display']}: Appreciation and Depreciation FX IRFs",
+            "Percent log points",
+        )
+        st.caption("The depreciation line is multiplied by -1 for visual comparison. The black dashed line is the symmetric FX IRF.")
+        table = displayed_results
+
+    if event_windows:
+        st.subheader("Sample Preview")
+        draw_sample_preview_chart(sample, shock_level_response, shock_name, event_windows)
+
+    st.subheader("Specification Comparison")
+    store = named_comparison_store("fx_irf")
+    default_label = (
+        f"{shock_label}, {mode_label}, {controls_label}, "
+        f"p={int(lags)}, h={int(horizons)}, {start:%Y-%m} to {end:%Y-%m}"
+    )
+    if event_windows_for_estimation:
+        default_label += ", dummies: " + ", ".join(event_window_label(window) for window in event_windows_for_estimation)
+    if event_windows_for_censoring:
+        default_label += ", censored: " + ", ".join(event_window_label(window) for window in event_windows_for_censoring)
+
+    col_add, col_clear = st.columns([3, 1])
+    spec_label = col_add.text_input("Current FX specification label", value=default_label, key="fx_irf_spec_label")
+    if col_add.button("Add current FX specification", type="primary", key="fx_irf_add_spec"):
+        stored_results = table.copy()
+        stored_results["spec_label"] = spec_label
+        store.append(
+            {
+                "label": spec_label,
+                "results": stored_results,
+                "shock": shock_label,
+                "mode": mode_label,
+                "controls": controls_label,
+                "sample": f"{start:%Y-%m} to {end:%Y-%m}",
+                "lags": int(lags),
+                "horizon": int(horizons),
+                "dummies": ", ".join(event_window_label(window) for window in event_windows_for_estimation) or "none",
+                "censored": ", ".join(event_window_label(window) for window in event_windows_for_censoring) or "none",
+            }
+        )
+        st.success(f"Added: {spec_label}")
+    if col_clear.button("Clear saved FX specs", key="fx_irf_clear_specs"):
+        store.clear()
+        st.success("Cleared saved FX specifications.")
+
+    if store:
+        labels = [spec["label"] for spec in store]
+        selected_labels = st.multiselect(
+            "Compare saved FX specifications",
+            labels,
+            default=labels[-min(4, len(labels)):],
+            key="fx_irf_compare_specs",
+        )
+        selected_specs = [spec for spec in store if spec["label"] in selected_labels]
+        if selected_specs:
+            draw_fx_comparison_chart(
+                selected_specs,
+                "FX IRF Specification Comparison",
+                "Percent log points",
+            )
+            summary = pd.DataFrame(
+                [
+                    {
+                        "label": spec["label"],
+                        "shock": spec["shock"],
+                        "mode": spec["mode"],
+                        "controls": spec["controls"],
+                        "sample": spec["sample"],
+                        "lags": spec["lags"],
+                        "horizon": spec["horizon"],
+                        "dummies": spec["dummies"],
+                        "censored": spec["censored"],
+                    }
+                    for spec in selected_specs
+                ]
+            )
+            st.dataframe(summary, width="stretch", hide_index=True)
+            combined = pd.concat(
+                [spec["results"].assign(spec_label=spec["label"]) for spec in selected_specs],
+                ignore_index=True,
+            )
+            st.download_button(
+                "Download FX comparison results",
+                data=combined.to_csv(index=False).encode("utf-8"),
+                file_name="fx_irf_specification_comparison.csv",
+                mime="text/csv",
+            )
+    else:
+        st.caption("Add FX specifications here to compare several exchange-rate paths in one chart.")
+
+    st.subheader("Results")
+    st.dataframe(table, width="stretch", hide_index=True)
+    st.download_button(
+        "Download FX IRF results",
+        data=table.to_csv(index=False).encode("utf-8"),
+        file_name="fx_irf_results.csv",
+        mime="text/csv",
+    )
+
+
+def render_real_indicator_gdp_page(data: pd.DataFrame) -> None:
+    module = real_indicator_module_or_stop()
+    real_data = module.safe_load_data(module.DATA_PATH)
+    if real_data.empty:
+        st.warning("No merged real-indicator data file found yet. Run the GDP dashboard data fetcher.")
+        return
+
+    start_date, end_date = module.date_bounds(real_data)
+    selected_range = st.slider(
+        "Sample window",
+        min_value=start_date.to_pydatetime(),
+        max_value=end_date.to_pydatetime(),
+        value=(start_date.to_pydatetime(), end_date.to_pydatetime()),
+        format="YYYY-Q",
+        key="real_indicator_gdp_sample",
+    )
+    start, end = [pd.Timestamp(value).to_period("Q").to_timestamp() for value in selected_range]
+    sample = real_data.loc[(real_data["date"] >= start) & (real_data["date"] <= end)].copy()
+    module.render_lp_page(sample)
+
+
+def render_real_indicator_unemployment_page(data: pd.DataFrame) -> None:
+    module = real_indicator_module_or_stop()
+    monthly_labor = module.safe_load_data(module.MONTHLY_LABOR_PATH)
+    module.render_monthly_labor_lp_page(monthly_labor)
+
+
+def render_real_indicator_data_audit_page(data: pd.DataFrame) -> None:
+    module = real_indicator_module_or_stop()
+    real_data = module.safe_load_data(module.DATA_PATH)
+    metadata = module.safe_load_metadata(module.COMPONENT_METADATA_PATH)
+    sources = module.safe_load_metadata(module.SOURCE_METADATA_PATH)
+    if real_data.empty:
+        st.warning("No merged real-indicator data file found yet. Run the GDP dashboard data fetcher.")
+        return
+
+    start_date, end_date = module.date_bounds(real_data)
+    selected_range = st.slider(
+        "Sample window",
+        min_value=start_date.to_pydatetime(),
+        max_value=end_date.to_pydatetime(),
+        value=(start_date.to_pydatetime(), end_date.to_pydatetime()),
+        format="YYYY-Q",
+        key="real_indicator_audit_sample",
+    )
+    start, end = [pd.Timestamp(value).to_period("Q").to_timestamp() for value in selected_range]
+    sample = real_data.loc[(real_data["date"] >= start) & (real_data["date"] <= end)].copy()
+    module.render_data_audit_page(real_data, sample, metadata, sources)
+
+
 def render_focus_groups_page(data: pd.DataFrame) -> None:
     st.title("Focus Groups")
     st.caption(
@@ -3658,6 +4105,14 @@ def main() -> None:
         render_baseline_lp_page(data)
     elif page == "Asymmetry LP":
         render_asymmetry_lp_page(data)
+    elif page == "FX IRF":
+        render_fx_irf_page(data)
+    elif page == "GDP LP":
+        render_real_indicator_gdp_page(data)
+    elif page == "Unemployment LP":
+        render_real_indicator_unemployment_page(data)
+    elif page == "Real Indicator Data Audit":
+        render_real_indicator_data_audit_page(data)
     elif page == "Major Groups":
         render_major_groups_page(data)
     elif page == "Focus Groups":
