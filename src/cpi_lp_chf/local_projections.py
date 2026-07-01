@@ -286,3 +286,105 @@ def estimate_asymmetric_dashboard_lp(
             )
 
     return pd.DataFrame(results)
+
+
+def estimate_split_shock_dashboard_lp(
+    data: pd.DataFrame,
+    response: str,
+    shock_name: str,
+    shock_components: dict[str, str],
+    controls: list[str],
+    config: LPConfig,
+    response_label: str,
+    cumulative_response: bool = False,
+    dummy_controls: list[str] | None = None,
+) -> pd.DataFrame:
+    """Estimate LPs with several user-provided shock components in one equation."""
+    dummy_controls = dummy_controls or []
+    component_columns = list(shock_components)
+    split_data = data.copy()
+
+    design = prepare_lp_design(
+        data=split_data,
+        response=response,
+        shock_name=shock_name,
+        controls=[*component_columns, *controls],
+        config=config,
+        cumulative_response=cumulative_response,
+        dummy_controls=dummy_controls,
+    )
+    split_leads = {}
+    for lead in range(1, config.horizons + 1):
+        for component in component_columns:
+            split_leads[f"{component}_lead_{lead}"] = design[component].shift(-lead)
+    if split_leads:
+        design = pd.concat([design, pd.DataFrame(split_leads, index=design.index)], axis=1)
+    results = []
+    z = z_value(config.ci_level)
+
+    lag_regressors = []
+    for lag in range(1, config.lags + 1):
+        lag_regressors.append(f"{response}_lag_{lag}")
+        for component in component_columns:
+            lag_regressors.append(f"{component}_lag_{lag}")
+        for control in controls:
+            lag_regressors.append(f"{control}_lag_{lag}")
+
+    for horizon in range(config.horizons + 1):
+        dep_var = f"{response}_lead_{horizon}"
+        if config.include_forward_shocks:
+            forward_shocks = [
+                f"{component}_lead_{lead}"
+                for lead in range(1, horizon + 1)
+                for component in component_columns
+            ]
+        else:
+            forward_shocks = []
+        regressors = [
+            *component_columns,
+            *controls,
+            *dummy_controls,
+            *forward_shocks,
+            *lag_regressors,
+        ]
+        sample = design.loc[:, [dep_var, *regressors]].dropna()
+        if sample.empty or len(sample) <= len(regressors) + 1:
+            for component, label in shock_components.items():
+                results.append(
+                    {
+                        "response": response_label,
+                        "shock_component": label,
+                        "horizon": horizon,
+                        "beta": np.nan,
+                        "std_error": np.nan,
+                        "ci_lower": np.nan,
+                        "ci_upper": np.nan,
+                        "nobs": len(sample),
+                        "r_squared": np.nan,
+                        "num_forward_shocks": len(forward_shocks),
+                    }
+                )
+            continue
+
+        y = sample[dep_var]
+        x = sm.add_constant(sample[regressors], has_constant="add")
+        model = sm.OLS(y, x).fit(cov_type="HAC", cov_kwds={"maxlags": max(horizon + 1, 1)})
+        for component, label in shock_components.items():
+            coef = model.params[component]
+            se = model.bse[component]
+            results.append(
+                {
+                    "response": response_label,
+                    "shock_component": label,
+                    "horizon": horizon,
+                    "beta": coef,
+                    "std_error": se,
+                    "ci_lower": coef - z * se,
+                    "ci_upper": coef + z * se,
+                    "nobs": int(model.nobs),
+                    "r_squared": model.rsquared,
+                    "num_forward_shocks": len(forward_shocks),
+                }
+            )
+
+    return pd.DataFrame(results)

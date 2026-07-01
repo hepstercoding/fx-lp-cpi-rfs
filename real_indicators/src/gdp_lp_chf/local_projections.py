@@ -224,6 +224,92 @@ def estimate_asymmetric_lp(
     return pd.DataFrame(results)
 
 
+def estimate_split_shock_lp(
+    data: pd.DataFrame,
+    response: str,
+    shock: str,
+    shock_components: dict[str, str],
+    controls: list[str],
+    config: LPConfig,
+    response_label: str,
+    shock_label: str,
+    cumulative_response: bool,
+) -> pd.DataFrame:
+    component_columns = list(shock_components)
+    design = prepare_lp_design(data, response, shock, [*component_columns, *controls], config, cumulative_response)
+
+    split_leads = {}
+    for lead in range(1, config.horizons + 1):
+        for component in component_columns:
+            split_leads[f"{component}_lead_{lead}"] = design[component].shift(-lead)
+    if split_leads:
+        design = pd.concat([design, pd.DataFrame(split_leads, index=design.index)], axis=1)
+
+    z = z_value(config.ci_level)
+    lag_regressors = []
+    for lag in range(1, config.lags + 1):
+        lag_regressors.append(f"{response}_lag_{lag}")
+        lag_regressors.extend(f"{component}_lag_{lag}" for component in component_columns)
+        lag_regressors.extend(f"{control}_lag_{lag}" for control in controls)
+
+    results = []
+    for horizon in range(config.horizons + 1):
+        dep_var = f"{response}_lead_{horizon}"
+        forward_shocks = (
+            [
+                f"{component}_lead_{lead}"
+                for lead in range(1, horizon + 1)
+                for component in component_columns
+            ]
+            if config.include_forward_shocks
+            else []
+        )
+        regressors = [*component_columns, *controls, *forward_shocks, *lag_regressors]
+        sample = design.loc[:, [dep_var, *regressors]].dropna()
+        if sample.empty or len(sample) <= len(regressors) + 1:
+            for component, label in shock_components.items():
+                results.append(
+                    {
+                        "response": response_label,
+                        "shock": shock_label,
+                        "regime": label,
+                        "horizon": horizon,
+                        "beta": np.nan,
+                        "std_error": np.nan,
+                        "ci_lower": np.nan,
+                        "ci_upper": np.nan,
+                        "nobs": len(sample),
+                        "r_squared": np.nan,
+                        "num_forward_shocks": len(forward_shocks),
+                    }
+                )
+            continue
+
+        y = sample[dep_var]
+        x = sm.add_constant(sample[regressors], has_constant="add")
+        model = sm.OLS(y, x).fit(cov_type="HAC", cov_kwds={"maxlags": max(horizon + 1, 1)})
+        for component, label in shock_components.items():
+            coef = float(model.params[component])
+            se = float(model.bse[component])
+            results.append(
+                {
+                    "response": response_label,
+                    "shock": shock_label,
+                    "regime": label,
+                    "horizon": horizon,
+                    "beta": coef,
+                    "std_error": se,
+                    "ci_lower": coef - z * se,
+                    "ci_upper": coef + z * se,
+                    "nobs": int(model.nobs),
+                    "r_squared": model.rsquared,
+                    "num_forward_shocks": len(forward_shocks),
+                }
+            )
+
+    return pd.DataFrame(results)
+
+
 def maintained_response_from_irfs(
     response_irf: pd.DataFrame,
     shock_path_irf: pd.DataFrame,

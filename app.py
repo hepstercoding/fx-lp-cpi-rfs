@@ -15,7 +15,12 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from cpi_lp_chf.local_projections import LPConfig, estimate_asymmetric_dashboard_lp, estimate_dashboard_lp
+from cpi_lp_chf.local_projections import (
+    LPConfig,
+    estimate_asymmetric_dashboard_lp,
+    estimate_dashboard_lp,
+    estimate_split_shock_dashboard_lp,
+)
 
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "swiss_macro_real.csv"
 REAL_INDICATOR_PROJECT_ROOT = PROJECT_ROOT / "real_indicators"
@@ -798,6 +803,117 @@ def run_asymmetric_lp(
 
 
 @st.cache_data(show_spinner=False)
+def run_large_appreciation_lp(
+    data: pd.DataFrame,
+    response: str,
+    display_response: str,
+    shock_level_response: str,
+    response_label: str,
+    transform_label: str,
+    display_transform_label: str,
+    controls: list[str],
+    shock_name: str,
+    shock_response_label: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    horizons: int,
+    lags: int,
+    include_forward_shocks: bool,
+    appreciation_percentile: float,
+    event_windows: list[dict[str, pd.Timestamp]],
+    censor_windows: list[dict[str, pd.Timestamp]] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, float, int, int]:
+    data = add_transforms(data)
+    data, dummy_controls = add_event_dummies(data, event_windows)
+    sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    sample = mask_censored_values(
+        sample,
+        censor_windows or [],
+        [response, display_response, shock_level_response, shock_name, *controls],
+    )
+    positive_moves = sample.loc[sample[shock_name].gt(0), shock_name].dropna()
+    if positive_moves.empty:
+        empty = pd.DataFrame(
+            columns=[
+                "response",
+                "shock_component",
+                "horizon",
+                "beta",
+                "std_error",
+                "ci_lower",
+                "ci_upper",
+                "nobs",
+                "r_squared",
+                "num_forward_shocks",
+            ]
+        )
+        return empty, empty.copy(), float("nan"), 0, 0
+
+    threshold = float(np.nanpercentile(positive_moves, appreciation_percentile))
+    large_component = f"{shock_name}_large_appreciation"
+    other_component = f"{shock_name}_all_other_moves"
+    large_mask = sample[shock_name].gt(0) & sample[shock_name].ge(threshold)
+    sample[large_component] = sample[shock_name].where(large_mask, 0.0)
+    sample[other_component] = sample[shock_name].where(~large_mask, 0.0)
+    shock_components = {
+        large_component: "Large appreciations",
+        other_component: "All other FX moves",
+    }
+
+    transform = LP_TRANSFORMS[transform_label]
+    display_transform = LP_TRANSFORMS[display_transform_label]
+    config = LPConfig(
+        horizons=horizons,
+        lags=lags,
+        ci_level=0.9,
+        include_forward_shocks=include_forward_shocks,
+    )
+    split_results = estimate_split_shock_dashboard_lp(
+        data=sample,
+        response=response,
+        shock_name=shock_name,
+        shock_components=shock_components,
+        controls=controls,
+        config=config,
+        response_label=f"{response_label} {transform_label}",
+        cumulative_response=bool(transform["cumulative"]),
+        dummy_controls=dummy_controls,
+    )
+    display_results = convert_response_by_group(
+        split_results,
+        transform_label,
+        display_transform_label,
+        "shock_component",
+    )
+    if display_results is None:
+        display_results = estimate_split_shock_dashboard_lp(
+            data=sample,
+            response=display_response,
+            shock_name=shock_name,
+            shock_components=shock_components,
+            controls=controls,
+            config=config,
+            response_label=f"{response_label} {display_transform_label}",
+            cumulative_response=bool(display_transform["cumulative"]),
+            dummy_controls=dummy_controls,
+        )
+        display_results["display_response"] = display_results["response"]
+        display_results["display_method"] = "direct_display_estimate"
+    fx_results = estimate_split_shock_dashboard_lp(
+        data=sample,
+        response=shock_level_response,
+        shock_name=shock_name,
+        shock_components=shock_components,
+        controls=controls,
+        config=config,
+        response_label=shock_response_label,
+        cumulative_response=True,
+        dummy_controls=dummy_controls,
+    )
+    return display_results, fx_results, threshold, int(large_mask.sum()), int(positive_moves.size)
+
+
+@st.cache_data(show_spinner=False)
 def run_major_group_yoy_lps(
     data: pd.DataFrame,
     seasonal_adjustment: str,
@@ -1272,6 +1388,40 @@ def maintained_response_from_irfs(
     return out
 
 
+def build_maintained_split_results(
+    response_results: pd.DataFrame,
+    shock_path_results: pd.DataFrame,
+) -> pd.DataFrame:
+    empty_columns = [
+        "response",
+        "shock_component",
+        "horizon",
+        "beta",
+        "std_error",
+        "ci_lower",
+        "ci_upper",
+        "raw_beta",
+        "maintenance_shock",
+        "maintained_exchange_rate_path",
+        "display_method",
+    ]
+    layered_results = []
+    for component, response_component in response_results.groupby("shock_component", sort=False):
+        path_component = shock_path_results.loc[shock_path_results["shock_component"].eq(component)].copy()
+        if path_component.empty:
+            continue
+        layered = maintained_response_from_irfs(
+            response_component,
+            path_component,
+            component,
+        )
+        if not layered.empty:
+            layered["response"] = response_component["response"].iloc[0] if "response" in response_component else component
+            layered["display_method"] = "layered"
+            layered_results.append(layered)
+    return pd.concat(layered_results, ignore_index=True) if layered_results else pd.DataFrame(columns=empty_columns)
+
+
 def build_maintained_asymmetry_results(
     response_results: pd.DataFrame,
     shock_path_results: pd.DataFrame,
@@ -1440,6 +1590,57 @@ def draw_sample_preview_chart(
     st.pyplot(fig, clear_figure=True)
 
 
+def draw_large_appreciation_definition_chart(
+    data: pd.DataFrame,
+    shock_level_column: str,
+    shock_change_column: str,
+    shock_label: str,
+    threshold: float,
+) -> None:
+    columns = [column for column in [shock_level_column, shock_change_column] if column in data.columns]
+    if len(columns) < 2 or np.isnan(threshold):
+        st.info("Not enough exchange-rate data to show the large-appreciation definition chart.")
+        return
+
+    plot_data = data.loc[:, ["date", shock_level_column, shock_change_column]].dropna(subset=[shock_change_column]).copy()
+    if plot_data.empty:
+        st.info("No exchange-rate observations are available in the selected sample.")
+        return
+
+    large_mask = plot_data[shock_change_column].gt(0) & plot_data[shock_change_column].ge(threshold)
+    large_dates = plot_data.loc[large_mask, "date"]
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6.2), sharex=True)
+    for ax in axes:
+        for date in large_dates:
+            ax.axvspan(date, date + pd.offsets.MonthEnd(1), color="#0F766E", alpha=0.14)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(True, alpha=0.22)
+
+    axes[0].plot(plot_data["date"], plot_data[shock_level_column], color="#2563EB", linewidth=1.7)
+    axes[0].set_title(f"{shock_label}: Appreciation-Positive FX Level", fontsize=11, pad=8)
+    axes[0].set_ylabel("Log level")
+
+    axes[1].plot(plot_data["date"], plot_data[shock_change_column], color="#4B5563", linewidth=1.2, label="Monthly FX move")
+    axes[1].scatter(
+        plot_data.loc[large_mask, "date"],
+        plot_data.loc[large_mask, shock_change_column],
+        color="#0F766E",
+        s=28,
+        zorder=3,
+        label="Large appreciation month",
+    )
+    axes[1].axhline(0, color="#4B5563", linewidth=0.8)
+    axes[1].axhline(threshold, color="#0F766E", linewidth=1.4, linestyle="--", label=f"Threshold: {threshold:.2f} pp")
+    axes[1].set_title("Monthly FX Move Used for the Large-Appreciation Split", fontsize=11, pad=8)
+    axes[1].set_ylabel("Percent log points")
+    axes[1].legend(frameon=False, fontsize=8)
+    axes[1].set_xlabel("")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
 def draw_missingness_heatmap(data: pd.DataFrame, columns: list[str]) -> None:
     columns = [column for column in columns if column in data.columns]
     if not columns:
@@ -1570,6 +1771,8 @@ def draw_fx_comparison_chart(specs: list[dict], title: str, ylabel: str) -> None
         "-1 x 1pp CHF depreciation": "#B45309",
         "Maintained +1% CHF appreciation": "#0F766E",
         "-1 x maintained 1% CHF depreciation": "#B45309",
+        "Large appreciations": "#0F766E",
+        "All other FX moves": "#B45309",
     }
     for spec in specs:
         results = spec["results"].dropna(subset=["beta"]).copy()
@@ -1613,6 +1816,8 @@ def draw_asymmetric_irf_chart(
     colors = {
         "+1pp CHF appreciation": "#0F766E",
         "-1 x 1pp CHF depreciation": "#B45309",
+        "Large appreciations": "#0F766E",
+        "All other FX moves": "#B45309",
     }
     fig, ax = plt.subplots(figsize=(11, 5.2))
     ax.axhline(0, color="#4B5563", linewidth=1)
@@ -2394,6 +2599,7 @@ def sidebar() -> tuple[str, Path]:
         "FX IRF",
         "Baseline LP",
         "Asymmetry LP",
+        "Large Appreciations",
         "Major Groups",
         "Focus Groups",
         "Data",
@@ -2412,7 +2618,7 @@ def sidebar() -> tuple[str, Path]:
 
     nav_button("FX IRF")
     st.sidebar.markdown("### CPI")
-    for label in ["Baseline LP", "Asymmetry LP", "Major Groups", "Focus Groups", "Data", "Methodology"]:
+    for label in ["Baseline LP", "Asymmetry LP", "Large Appreciations", "Major Groups", "Focus Groups", "Data", "Methodology"]:
         nav_button(label)
     st.sidebar.markdown("### Real Variables")
     for label in ["GDP LP", "Unemployment LP", "Real Indicator Data Audit"]:
@@ -3025,6 +3231,391 @@ def render_baseline_lp_page(data: pd.DataFrame) -> None:
         "Download selected results",
         data=table.to_csv(index=False).encode("utf-8"),
         file_name=f"{table_choice.lower().replace(' ', '_')}_lp_results.csv",
+        mime="text/csv",
+    )
+
+
+def render_large_appreciations_page(data: pd.DataFrame) -> None:
+    st.title("Large Appreciations")
+    st.caption(
+        "Split the selected CHF move into large appreciations and all other FX moves. "
+        "The threshold is a percentile among positive CHF appreciation months in the selected estimation sample."
+    )
+
+    min_date = data["date"].min().to_pydatetime()
+    max_date = data["date"].max().to_pydatetime()
+
+    with st.container(border=True):
+        col_a, col_b, col_c, col_d, col_e, col_f = st.columns([1.2, 0.9, 1.05, 1.15, 1.15, 1.05])
+        response_label = col_a.selectbox("Response", BASELINE_LP_RESPONSES, index=0, key="large_response")
+        seasonal_adjustment = col_b.selectbox("Index", ["SA", "NSA"], index=0, key="large_index")
+        available_shocks = available_exchange_rate_shocks(data)
+        shock_label = col_c.selectbox("CHF shock", available_shocks, index=0, key="large_shock")
+        transform_label = col_d.selectbox("Estimated dependent variable", list(LP_TRANSFORMS), index=0, key="large_transform")
+        display_transform_label = col_e.selectbox("Displayed response", list(LP_TRANSFORMS), index=0, key="large_display_transform")
+        appreciation_percentile = col_f.slider(
+            "Large threshold",
+            min_value=50,
+            max_value=99,
+            value=90,
+            step=1,
+            format="p%d",
+        )
+
+        col_d, col_e, col_f, col_g, col_h = st.columns([1.4, 1, 1, 1, 1.1])
+        selected_dates = col_d.slider(
+            "Estimation range",
+            min_value=min_date,
+            max_value=max_date,
+            value=(min_date, max_date),
+            format="YYYY-MM",
+            key="large_dates",
+        )
+        controls_label = col_e.selectbox("Controls", list(LP_CONTROL_SETS), index=1, key="large_controls")
+        horizons = col_f.number_input("Horizon", min_value=1, max_value=60, value=36, step=1, key="large_horizons")
+        lags = col_g.number_input("Lags", min_value=1, max_value=24, value=12, step=1, key="large_lags")
+        fx_path_label = col_h.selectbox(
+            "FX path",
+            ["Standard", "Layered 1% move", "Forward shocks"],
+            index=0,
+            key="large_fx_path",
+        )
+
+    with st.expander("Period Dummies and Event Windows", expanded=False):
+        month_options = monthly_options(pd.Timestamp(min_date), pd.Timestamp(max_date))
+        selected_presets = st.multiselect(
+            "Preset windows",
+            options=list(EVENT_PRESETS),
+            default=[],
+            key="large_presets",
+        )
+        preset_windows = []
+        for name in selected_presets:
+            preset_window = event_preset_window(name)
+            action = st.selectbox(
+                f"{name} action",
+                WINDOW_ACTIONS,
+                index=WINDOW_ACTIONS.index(default_window_action(preset_window)),
+                key=f"large_preset_action_{slugify_name(name)}",
+            )
+            preset_windows.append(apply_window_action(preset_window, action))
+        custom_count = st.number_input("Custom windows", min_value=0, max_value=3, value=0, step=1, key="large_custom_count")
+        custom_windows = []
+        for idx in range(int(custom_count)):
+            col_a, col_b, col_c, col_d = st.columns([1.4, 1, 1, 1.2])
+            custom_name = col_a.text_input("Name", value=f"Custom window {idx + 1}", key=f"large_custom_event_name_{idx}")
+            custom_start = col_b.selectbox(
+                "Start",
+                options=month_options,
+                index=0,
+                key=f"large_custom_event_start_{idx}",
+            )
+            custom_end = col_c.selectbox(
+                "End",
+                options=month_options,
+                index=0,
+                key=f"large_custom_event_end_{idx}",
+            )
+            action = col_d.selectbox(
+                "Action",
+                WINDOW_ACTIONS,
+                index=0,
+                key=f"large_custom_event_action_{idx}",
+            )
+            custom_windows.append(
+                apply_window_action(
+                    {
+                        "name": custom_name,
+                        "start": pd.Timestamp(custom_start),
+                        "end": pd.Timestamp(custom_end),
+                    },
+                    action,
+                )
+            )
+        st.caption(
+            "`Period dummy` adds one D_t control for the full range. `Dummy for each month` adds one D_t control per selected month. "
+            "`Censor` drops the selected months from estimation."
+        )
+
+    event_windows = preset_windows
+    event_windows.extend(custom_windows)
+    event_windows_for_estimation = dummy_windows(event_windows)
+    event_windows_for_censoring = censor_windows(event_windows)
+
+    start = pd.Timestamp(selected_dates[0])
+    end = pd.Timestamp(selected_dates[1])
+    shock_settings = EXCHANGE_RATE_SHOCKS[shock_label]
+    shock_name = shock_settings["change"]
+    shock_level_response = shock_settings["log_level"]
+    include_forward_shocks = fx_path_label == "Forward shocks"
+    use_layered_shocks = fx_path_label == "Layered 1% move"
+    base_response = LP_RESPONSES[response_label][seasonal_adjustment.lower()]
+    response = response_column(base_response, transform_label)
+    display_response = response_column(base_response, display_transform_label)
+    price_response = response_column(base_response, "Cumulative price difference")
+    controls = [control for control in LP_CONTROL_SETS[controls_label] if control in data.columns]
+    sample = data.loc[(data["date"] >= start) & (data["date"] <= end)].copy()
+    sample_after_censoring = apply_censor_windows(sample, event_windows_for_censoring)
+    if sample_after_censoring.empty:
+        st.error("The selected censor windows remove the entire estimation sample. Shorten the censor range or choose a dummy action.")
+        st.stop()
+
+    st.subheader("Estimated Equation")
+    equation_symbol = LP_TRANSFORMS[transform_label]["equation_label"]
+    st.latex(
+        rf"""
+        {equation_symbol}_{{t+h}}
+        = \alpha_h + \beta^L_h \Delta s^L_t + \beta^O_h \Delta s^O_t
+        + \Gamma_h Z_t + \sum_{{j=1}}^{{{int(lags)}}} A_{{h,j}} X_{{t-j}} + D_t'\Theta_h + \varepsilon_{{t+h}}
+        """
+    )
+    st.latex(
+        rf"""
+        \Delta s^L_t = \Delta s_t \mathbf{{1}}\{{\Delta s_t \ge q_{{{int(appreciation_percentile)}}}(\Delta s_t \mid \Delta s_t>0)\}},
+        \quad
+        \Delta s^O_t = \Delta s_t - \Delta s^L_t
+        """
+    )
+    st.caption(
+        f"Here {equation_symbol} is the selected {response_label} transformation ({transform_label}), "
+        f"using the {seasonal_adjustment} index. Delta s is the monthly {shock_label} log move, "
+        f"and a positive Delta s means {shock_settings['positive_text']}."
+    )
+    if fx_path_label == "Standard":
+        st.caption("FX path: one initial split FX move followed by the estimated exchange-rate IRF for that split component.")
+    elif fx_path_label == "Layered 1% move":
+        st.caption(
+            "FX path: each split component is first estimated without forward-shock controls, then future FX moves are layered so that component's FX path stays at 1%."
+        )
+    else:
+        st.caption("FX path: forward split FX moves enter the CPI and FX equations, isolating the initial split move conditional on later FX changes.")
+    st.caption("Confidence intervals shown in the charts are 90% HAC intervals.")
+    if controls:
+        st.caption(f"Controls in Z: {', '.join(controls)}.")
+    else:
+        st.caption("Controls in Z: none.")
+    if event_windows_for_estimation:
+        st.caption("Period dummies in D: " + ", ".join(event_window_label(window) for window in event_windows_for_estimation) + ".")
+    if event_windows_for_censoring:
+        st.caption("Censored windows are excluded from estimation: " + ", ".join(event_window_label(window) for window in event_windows_for_censoring) + ".")
+
+    results, fx_results, threshold, large_count, positive_count = run_large_appreciation_lp(
+        data=data,
+        response=response,
+        display_response=display_response,
+        shock_level_response=shock_level_response,
+        response_label=response_label,
+        transform_label=transform_label,
+        display_transform_label=display_transform_label,
+        controls=controls,
+        shock_name=shock_name,
+        shock_response_label=shock_settings["level_label"],
+        start=start,
+        end=end,
+        horizons=int(horizons),
+        lags=int(lags),
+        include_forward_shocks=include_forward_shocks,
+        appreciation_percentile=float(appreciation_percentile),
+        event_windows=event_windows_for_estimation,
+        censor_windows=event_windows_for_censoring,
+    )
+    symmetric_results, symmetric_fx_results, _, _ = run_lp(
+        data=data,
+        response=response,
+        display_response=display_response,
+        price_response=price_response,
+        response_label=response_label,
+        transform_label=transform_label,
+        display_transform_label=display_transform_label,
+        controls=controls,
+        shock_name=shock_name,
+        shock_level_response=shock_level_response,
+        shock_response_label=shock_settings["level_label"],
+        start=start,
+        end=end,
+        horizons=int(horizons),
+        lags=int(lags),
+        include_forward_shocks=include_forward_shocks,
+        event_windows=event_windows_for_estimation,
+        censor_windows=event_windows_for_censoring,
+    )
+    if use_layered_shocks:
+        results = build_maintained_split_results(results, fx_results)
+        symmetric_results = maintained_response_from_irfs(
+            symmetric_results,
+            symmetric_fx_results,
+            "Symmetric IRF",
+        )
+        fx_results = build_maintained_split_results(fx_results, fx_results)
+        symmetric_fx_results = maintained_response_from_irfs(
+            symmetric_fx_results,
+            symmetric_fx_results,
+            "Symmetric IRF",
+        )
+
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("Rows after censoring", f"{len(sample_after_censoring):,}", delta=f"{len(sample_after_censoring) - len(sample):,}")
+    col_b.metric("Positive appreciation months", f"{positive_count:,}")
+    col_c.metric("Large appreciation months", f"{large_count:,}")
+    col_d.metric("Threshold", "n/a" if np.isnan(threshold) else f"{threshold:.2f} pp", delta=fx_path_label)
+
+    if results.empty:
+        st.error("No positive appreciation months are available in the selected sample.")
+        st.stop()
+
+    st.subheader("Large-Appreciation Definition")
+    draw_large_appreciation_definition_chart(
+        sample_after_censoring,
+        shock_level_response,
+        shock_name,
+        shock_settings["display"],
+        threshold,
+    )
+    st.caption(
+        "Green shading marks months classified as large appreciations: positive CHF moves at or above the selected percentile "
+        "among all positive appreciation months in the estimation sample after censoring."
+    )
+
+    if event_windows:
+        st.subheader("Sample Preview")
+        draw_sample_preview_chart(sample, response, shock_name, event_windows)
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "window": [event_window_label(window) for window in event_windows],
+                    "start": [pd.Timestamp(window["start"]).date() for window in event_windows],
+                    "end": [pd.Timestamp(window["end"]).date() for window in event_windows],
+                    "treatment": [event_window_type(window) for window in event_windows],
+                    "dummy_columns": [event_dummy_column_count(window) for window in event_windows],
+                    "censored_months": [
+                        len(pd.period_range(window["start"], window["end"], freq="M"))
+                        if window.get("treatment") == "Censor"
+                        else 0
+                        for window in event_windows
+                    ],
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    display_method = results["display_method"].iloc[0] if "display_method" in results else "direct"
+    draw_asymmetric_irf_chart(
+        results,
+        symmetric_results,
+        f"{response_label} {display_transform_label}: Large Appreciations vs All Else",
+        "Percentage points" if display_transform_label != "Cumulative price difference" else "Percent log points",
+    )
+    if display_method == "converted":
+        st.caption("Converted-response confidence bands use a diagonal delta-method approximation across horizons.")
+    elif display_method == "direct_display_estimate":
+        st.caption("Displayed response is estimated directly because it cannot be recovered from the selected background estimate.")
+    elif display_method == "layered":
+        st.caption("Layered-response confidence bands are approximate and ignore uncertainty in the estimated FX path used for layering.")
+
+    st.subheader("FX Response")
+    draw_asymmetric_irf_chart(
+        fx_results,
+        symmetric_fx_results,
+        f"{shock_settings['display']} Response by Split FX Shock",
+        "Percent log points",
+    )
+    if use_layered_shocks:
+        st.caption("Layered FX path is held at +1 for each split component.")
+    elif include_forward_shocks:
+        st.caption("FX response is conditional on future split FX moves included through the selected horizon.")
+    else:
+        st.caption("FX response is the estimated persistence of each split shock component.")
+
+    st.subheader("Specification Comparison")
+    store = named_comparison_store("large_appreciations")
+    default_label = default_spec_label(
+        response_label=response_label,
+        shock_label=shock_label,
+        transform_label=transform_label,
+        display_transform_label=display_transform_label,
+        controls_label=controls_label,
+        include_forward_shocks=False,
+        start=start,
+        end=end,
+        event_windows_for_estimation=event_windows_for_estimation,
+        event_windows_for_censoring=event_windows_for_censoring,
+    )
+    default_label = f"{default_label}, {seasonal_adjustment}, p{int(appreciation_percentile)}"
+    default_label = f"{default_label}, {fx_path_label}"
+    col_add, col_clear = st.columns([3, 1])
+    spec_label = col_add.text_input("Current specification label", value=default_label, key="large_spec_label")
+    if col_add.button("Add current specification", type="primary", key="large_add_spec"):
+        stored_results = results.copy()
+        stored_results["spec_label"] = spec_label
+        store.append(
+            {
+                "label": spec_label,
+                "results": stored_results,
+                "response": response_label,
+                "estimated": transform_label,
+                "displayed": display_transform_label,
+                "index": seasonal_adjustment,
+                "shock": shock_label,
+                "threshold": f"p{int(appreciation_percentile)}",
+                "fx_path": fx_path_label,
+                "controls": controls_label,
+                "sample": f"{start:%Y-%m} to {end:%Y-%m}",
+                "dummies": ", ".join(event_window_label(window) for window in event_windows_for_estimation) or "none",
+                "censored": ", ".join(event_window_label(window) for window in event_windows_for_censoring) or "none",
+            }
+        )
+        st.success(f"Added: {spec_label}")
+    if col_clear.button("Clear saved specs", key="large_clear_specs"):
+        store.clear()
+        st.success("Cleared saved specifications.")
+
+    if store:
+        labels = [spec["label"] for spec in store]
+        selected_labels = st.multiselect("Compare saved specifications", labels, default=labels[-min(4, len(labels)):], key="large_compare_specs")
+        selected_specs = [spec for spec in store if spec["label"] in selected_labels]
+        if selected_specs:
+            draw_fx_comparison_chart(
+                selected_specs,
+                f"{display_transform_label} Response: Large-Appreciation Specification Comparison",
+                "Percentage points" if display_transform_label != "Cumulative price difference" else "Percent log points",
+            )
+            summary = pd.DataFrame(
+                [
+                    {
+                        "label": spec["label"],
+                        "response": spec["response"],
+                        "estimated": spec["estimated"],
+                        "displayed": spec["displayed"],
+                        "index": spec.get("index", ""),
+                        "shock": spec.get("shock", "BIS CHF NEER"),
+                        "threshold": spec.get("threshold", ""),
+                        "fx_path": spec.get("fx_path", ""),
+                        "controls": spec["controls"],
+                        "sample": spec["sample"],
+                        "dummies": spec["dummies"],
+                        "censored": spec.get("censored", "none"),
+                    }
+                    for spec in selected_specs
+                ]
+            )
+            st.dataframe(summary, width="stretch", hide_index=True)
+    else:
+        st.caption("Add specifications here to compare several large-appreciation splits in one chart.")
+
+    st.subheader("Results")
+    table_choice = st.radio(
+        "Table",
+        [f"Displayed CPI {display_transform_label} response", shock_settings["display"]],
+        horizontal=True,
+        key="large_table_choice",
+    )
+    table = results if table_choice == f"Displayed CPI {display_transform_label} response" else fx_results
+    st.dataframe(table, width="stretch", hide_index=True)
+    st.download_button(
+        "Download results",
+        data=table.to_csv(index=False).encode("utf-8"),
+        file_name="large_appreciations_lp_results.csv",
         mime="text/csv",
     )
 
@@ -4105,6 +4696,8 @@ def main() -> None:
         render_baseline_lp_page(data)
     elif page == "Asymmetry LP":
         render_asymmetry_lp_page(data)
+    elif page == "Large Appreciations":
+        render_large_appreciations_page(data)
     elif page == "FX IRF":
         render_fx_irf_page(data)
     elif page == "GDP LP":

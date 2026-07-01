@@ -18,6 +18,7 @@ from gdp_lp_chf.local_projections import (
     LPConfig,
     estimate_asymmetric_lp,
     estimate_lp,
+    estimate_split_shock_lp,
     maintained_response_from_irfs,
     z_value,
 )
@@ -370,6 +371,123 @@ def asymmetric_lp_chart(
     )
 
 
+def split_lp_chart(
+    split_results: pd.DataFrame,
+    symmetric_results: pd.DataFrame,
+    y_label: str,
+    regimes: list[str],
+    horizon_unit: str = "quarters",
+    reference_value: float = 0.0,
+) -> None:
+    chart_data = split_results.loc[
+        split_results["regime"].isin(regimes),
+        ["horizon", "regime", "beta", "ci_lower", "ci_upper"],
+    ].dropna()
+    symmetric_data = symmetric_results.loc[:, ["horizon", "beta"]].dropna() if not symmetric_results.empty else pd.DataFrame()
+    if chart_data.empty and symmetric_data.empty:
+        st.info("No estimated horizons to plot.")
+        return
+
+    horizon_title = f"Horizon, {horizon_unit}"
+    x_axis = alt.X("horizon:Q", title=horizon_title)
+    palette = ["#0F766E", "#B45309"]
+    layers = []
+    if not chart_data.empty:
+        layers.append(
+            alt.Chart(chart_data)
+            .mark_area(opacity=0.15)
+            .encode(
+                x=x_axis,
+                y=alt.Y("ci_lower:Q", title=y_label),
+                y2="ci_upper:Q",
+                color=alt.Color("regime:N", scale=alt.Scale(domain=regimes, range=palette[: len(regimes)]), title="Shock"),
+            )
+        )
+        layers.append(
+            alt.Chart(chart_data)
+            .mark_line(strokeWidth=2.4)
+            .encode(
+                x=x_axis,
+                y=alt.Y("beta:Q", title=y_label),
+                color=alt.Color("regime:N", scale=alt.Scale(domain=regimes, range=palette[: len(regimes)]), title="Shock"),
+            )
+        )
+    if not symmetric_data.empty:
+        layers.append(
+            alt.Chart(symmetric_data)
+            .mark_line(color="#111827", strokeDash=[6, 4], strokeWidth=2.1)
+            .encode(x=x_axis, y=alt.Y("beta:Q", title=y_label))
+        )
+
+    horizon_min = chart_data["horizon"].min() if not chart_data.empty else symmetric_data["horizon"].min()
+    horizon_max = chart_data["horizon"].max() if not chart_data.empty else symmetric_data["horizon"].max()
+    reference_data = pd.DataFrame({"x_start": [horizon_min], "x_end": [horizon_max], "y": [reference_value]})
+    layers.append(
+        alt.Chart(reference_data)
+        .mark_rule(color="#4B5563", strokeWidth=1.2)
+        .encode(x=alt.X("x_start:Q", title=horizon_title), x2="x_end:Q", y="y:Q")
+    )
+    st.altair_chart(alt.layer(*layers).properties(height=460), use_container_width=True)
+    if not symmetric_data.empty:
+        st.caption("Black dashed line: symmetric IRF estimated on the same sample and controls.")
+
+
+def large_appreciation_definition_chart(
+    sample: pd.DataFrame,
+    shock_level_column: str,
+    shock_column: str,
+    shock_label: str,
+    threshold: float,
+    frequency_label: str,
+) -> None:
+    if shock_level_column not in sample.columns or shock_column not in sample.columns or np.isnan(threshold):
+        st.info("Not enough exchange-rate data to show the large-appreciation definition chart.")
+        return
+    plot_data = sample.loc[:, ["date", shock_level_column, shock_column]].dropna(subset=[shock_column]).copy()
+    if plot_data.empty:
+        st.info("No exchange-rate observations are available in the selected sample.")
+        return
+    plot_data["large_appreciation"] = plot_data[shock_column].gt(0) & plot_data[shock_column].ge(threshold)
+    level = (
+        alt.Chart(plot_data)
+        .mark_line(color="#2563EB", strokeWidth=1.8)
+        .encode(x=alt.X("date:T", title=""), y=alt.Y(f"{shock_level_column}:Q", title="Log level"))
+    )
+    level_points = (
+        alt.Chart(plot_data.loc[plot_data["large_appreciation"]])
+        .mark_point(color="#0F766E", filled=True, size=55)
+        .encode(x="date:T", y=f"{shock_level_column}:Q")
+    )
+    moves = (
+        alt.Chart(plot_data)
+        .mark_line(color="#4B5563", strokeWidth=1.3)
+        .encode(x=alt.X("date:T", title=""), y=alt.Y(f"{shock_column}:Q", title="Percent log points"))
+    )
+    move_points = (
+        alt.Chart(plot_data.loc[plot_data["large_appreciation"]])
+        .mark_point(color="#0F766E", filled=True, size=65)
+        .encode(x="date:T", y=f"{shock_column}:Q")
+    )
+    rules = pd.DataFrame({"value": [0.0, threshold], "label": ["Zero", "Large threshold"]})
+    move_rules = (
+        alt.Chart(rules)
+        .mark_rule(strokeDash=[5, 4], strokeWidth=1.3)
+        .encode(
+            y="value:Q",
+            color=alt.Color(
+                "label:N",
+                scale=alt.Scale(domain=["Zero", "Large threshold"], range=["#4B5563", "#0F766E"]),
+                title="",
+            ),
+        )
+    )
+    chart = alt.vconcat(
+        (level + level_points).properties(title=f"{shock_label}: appreciation-positive FX level", height=220),
+        (moves + move_points + move_rules).properties(title=f"{frequency_label} FX move used for the large-appreciation split", height=260),
+    ).resolve_scale(color="independent")
+    st.altair_chart(chart, use_container_width=True)
+
+
 @st.cache_data(show_spinner=False)
 def run_headline_lp(
     data: pd.DataFrame,
@@ -432,6 +550,105 @@ def run_asymmetric_lp(
         shock_label=shock_label,
         cumulative_response=cumulative_response,
     )
+
+
+@st.cache_data(show_spinner=False)
+def run_large_appreciation_lp(
+    data: pd.DataFrame,
+    response_column: str,
+    response_label: str,
+    shock_column: str,
+    shock_label: str,
+    shock_level_column: str,
+    shock_level_label: str,
+    controls: list[str],
+    horizons: int,
+    lags: int,
+    ci_level: float,
+    cumulative_response: bool,
+    include_forward_shocks: bool,
+    appreciation_percentile: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, float, int, int]:
+    sample = data.copy()
+    positive_moves = sample.loc[sample[shock_column].gt(0), shock_column].dropna()
+    if positive_moves.empty:
+        empty = pd.DataFrame(
+            columns=[
+                "response",
+                "shock",
+                "regime",
+                "horizon",
+                "beta",
+                "std_error",
+                "ci_lower",
+                "ci_upper",
+                "nobs",
+                "r_squared",
+                "num_forward_shocks",
+            ]
+        )
+        return empty, empty.copy(), float("nan"), 0, 0
+
+    threshold = float(np.nanpercentile(positive_moves, appreciation_percentile))
+    large_component = f"{shock_column}_large_appreciation"
+    other_component = f"{shock_column}_all_other_moves"
+    large_mask = sample[shock_column].gt(0) & sample[shock_column].ge(threshold)
+    sample[large_component] = sample[shock_column].where(large_mask, 0.0)
+    sample[other_component] = sample[shock_column].where(~large_mask, 0.0)
+    shock_components = {
+        large_component: "Large appreciations",
+        other_component: "All other FX moves",
+    }
+    config = LPConfig(
+        horizons=horizons,
+        lags=lags,
+        ci_level=ci_level,
+        include_forward_shocks=include_forward_shocks,
+    )
+    response_results = estimate_split_shock_lp(
+        data=sample,
+        response=response_column,
+        shock=shock_column,
+        shock_components=shock_components,
+        controls=controls,
+        config=config,
+        response_label=response_label,
+        shock_label=shock_label,
+        cumulative_response=cumulative_response,
+    )
+    fx_results = pd.DataFrame()
+    if shock_level_column in sample.columns:
+        fx_results = estimate_split_shock_lp(
+            data=sample,
+            response=shock_level_column,
+            shock=shock_column,
+            shock_components=shock_components,
+            controls=controls,
+            config=config,
+            response_label=shock_level_label,
+            shock_label=shock_label,
+            cumulative_response=True,
+        )
+    return response_results, fx_results, threshold, int(large_mask.sum()), int(positive_moves.size)
+
+
+def layered_split_response_from_irfs(response_irf: pd.DataFrame, shock_path_irf: pd.DataFrame, ci_level: float) -> pd.DataFrame:
+    layered_parts = []
+    for regime, response_part in response_irf.groupby("regime", sort=False):
+        path_part = shock_path_irf.loc[shock_path_irf["regime"].eq(regime)].copy()
+        if response_part.empty or path_part.empty:
+            continue
+        layered = maintained_response_from_irfs(
+            response_part,
+            path_part,
+            ci_level=ci_level,
+            label=response_part["response"].iloc[0] if "response" in response_part else regime,
+        )
+        if layered.empty:
+            continue
+        layered["regime"] = regime
+        layered_parts.append(layered)
+    return pd.concat(layered_parts, ignore_index=True) if layered_parts else pd.DataFrame(columns=response_irf.columns)
 
 
 def layered_asymmetric_response_from_irfs(
@@ -912,17 +1129,270 @@ def render_asymmetric_irf_tab(sample: pd.DataFrame) -> None:
         st.info("Select at least one asymmetric IRF.")
 
 
+def render_large_appreciation_lp_section(
+    data: pd.DataFrame,
+    response_options: dict[str, dict],
+    shock_options: dict[str, dict],
+    title: str,
+    key_prefix: str,
+    horizon_unit: str,
+    horizon_min: int,
+    horizon_max: int,
+    horizon_default: int,
+    horizon_step: int,
+    lag_max: int,
+    lag_default: int,
+    controls_enabled: bool,
+) -> None:
+    st.subheader(title)
+    start_date, end_date = date_bounds(data)
+    min_date = start_date.to_pydatetime()
+    max_date = end_date.to_pydatetime()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        response_name = st.selectbox("Response", list(response_options), index=0, key=f"{key_prefix}_large_response")
+        shock_name = st.selectbox("Shock", list(shock_options), index=0, key=f"{key_prefix}_large_shock")
+    with col2:
+        selected_control_labels: list[str] = []
+        if controls_enabled:
+            selected_control_labels = st.multiselect(
+                "Controls",
+                options=list(CONTROL_OPTIONS),
+                default=[],
+                key=f"{key_prefix}_large_controls",
+            )
+        ci_level = st.selectbox(
+            "Confidence band",
+            [0.68, 0.90, 0.95],
+            index=1,
+            format_func=lambda x: f"{int(x * 100)}%",
+            key=f"{key_prefix}_large_ci",
+        )
+        date_range = st.slider(
+            "Sample window",
+            min_value=min_date,
+            max_value=max_date,
+            value=(min_date, max_date),
+            format="YYYY-MM",
+            key=f"{key_prefix}_large_date_range",
+        )
+    with col3:
+        fx_path_label = st.selectbox(
+            "FX path",
+            ["Standard", "Layered 1% move", "Forward shocks"],
+            index=0,
+            key=f"{key_prefix}_large_fx_path",
+        )
+        appreciation_percentile = st.slider(
+            "Large threshold",
+            min_value=50,
+            max_value=99,
+            value=90,
+            step=1,
+            format="p%d",
+            key=f"{key_prefix}_large_percentile",
+        )
+        horizons = st.slider(
+            "Horizon",
+            min_value=horizon_min,
+            max_value=horizon_max,
+            value=horizon_default,
+            step=horizon_step,
+            key=f"{key_prefix}_large_horizon",
+        )
+        lags = st.slider("Lags", min_value=1, max_value=lag_max, value=lag_default, step=1, key=f"{key_prefix}_large_lags")
+
+    response_settings = response_options[response_name]
+    shock_settings = shock_options[shock_name]
+    include_forward_shocks = fx_path_label == "Forward shocks"
+    use_layered_shocks = fx_path_label == "Layered 1% move"
+    selected_start, selected_end = date_range
+    sample = data.loc[(data["date"] >= pd.Timestamp(selected_start)) & (data["date"] <= pd.Timestamp(selected_end))].copy()
+
+    if controls_enabled:
+        selected_controls, missing_controls = selected_valid_controls(
+            sample,
+            selected_control_labels,
+            [response_settings["column"], shock_settings["column"]],
+        )
+        if missing_controls:
+            st.warning(f"Unavailable controls omitted: {', '.join(missing_controls)}")
+    else:
+        selected_controls = []
+
+    required_columns = [
+        response_settings["column"],
+        shock_settings["column"],
+        shock_settings["level_column"],
+        *selected_controls,
+    ]
+    available_required = [column for column in required_columns if column in sample.columns]
+    lp_sample = sample.loc[:, ["date", *available_required]].dropna().copy()
+    if len(available_required) < len(required_columns):
+        missing = sorted(set(required_columns).difference(sample.columns))
+        st.warning(f"Unavailable required columns: {', '.join(missing)}")
+    if len(lp_sample) <= (3 + 2 * lags + len(selected_controls) * lags + horizons + 5):
+        st.warning("The selected large-appreciation model has a thin usable sample. Consider fewer lags, fewer controls, or a wider date range.")
+    if lp_sample.empty:
+        st.info("No usable observations for the selected large-appreciation LP setup.")
+        return
+
+    results, fx_results, threshold, large_count, positive_count = run_large_appreciation_lp(
+        data=lp_sample,
+        response_column=response_settings["column"],
+        response_label=response_settings["label"],
+        shock_column=shock_settings["column"],
+        shock_label=shock_settings["label"],
+        shock_level_column=shock_settings["level_column"],
+        shock_level_label=shock_settings["level_label"],
+        controls=selected_controls,
+        horizons=horizons,
+        lags=lags,
+        ci_level=ci_level,
+        cumulative_response=bool(response_settings["cumulative"]),
+        include_forward_shocks=include_forward_shocks,
+        appreciation_percentile=float(appreciation_percentile),
+    )
+    symmetric_results = run_headline_lp(
+        data=lp_sample,
+        response_column=response_settings["column"],
+        response_label=response_settings["label"],
+        shock_column=shock_settings["column"],
+        shock_label=shock_settings["label"],
+        controls=selected_controls,
+        horizons=horizons,
+        lags=lags,
+        ci_level=ci_level,
+        cumulative_response=bool(response_settings["cumulative"]),
+        include_forward_shocks=include_forward_shocks,
+    )
+    symmetric_fx_results = run_headline_lp(
+        data=lp_sample,
+        response_column=shock_settings["level_column"],
+        response_label=shock_settings["level_label"],
+        shock_column=shock_settings["column"],
+        shock_label=shock_settings["label"],
+        controls=selected_controls,
+        horizons=horizons,
+        lags=lags,
+        ci_level=ci_level,
+        cumulative_response=True,
+        include_forward_shocks=include_forward_shocks,
+    )
+    if use_layered_shocks and not fx_results.empty:
+        results = layered_split_response_from_irfs(results, fx_results, ci_level)
+        symmetric_results = maintained_response_from_irfs(
+            symmetric_results,
+            symmetric_fx_results,
+            ci_level=ci_level,
+            label=f"{response_settings['label']} under maintained 1% CHF appreciation",
+        )
+        fx_results = layered_split_response_from_irfs(fx_results, fx_results, ci_level)
+        symmetric_fx_results = maintained_response_from_irfs(
+            symmetric_fx_results,
+            symmetric_fx_results,
+            ci_level=ci_level,
+            label=f"{shock_settings['level_label']} under maintained 1% CHF appreciation",
+        )
+
+    if results.empty:
+        st.info("No usable large-appreciation LP estimates are available for the selected setup.")
+        return
+
+    metric_cols = st.columns(4)
+    valid_nobs = results["nobs"].replace(0, np.nan) if "nobs" in results else pd.Series(dtype=float)
+    metric_cols[0].metric("Usable rows", f"{len(lp_sample):,}")
+    metric_cols[1].metric("Positive appreciation periods", f"{positive_count:,}")
+    metric_cols[2].metric("Large appreciation periods", f"{large_count:,}")
+    metric_cols[3].metric("Threshold", "n/a" if np.isnan(threshold) else f"{threshold:.2f} pp", delta=fx_path_label)
+
+    st.caption(
+        f"Large appreciations are positive CHF moves at or above p{int(appreciation_percentile)} among positive appreciation periods "
+        f"in the selected sample. Controls: {', '.join(selected_controls) if selected_controls else 'none'}."
+    )
+    if fx_path_label == "Standard":
+        st.caption("FX path: one initial split FX move followed by the estimated FX path for that split component.")
+    elif fx_path_label == "Layered 1% move":
+        st.caption(
+            "FX path: split one-shock IRFs are layered so each split component's CHF appreciation path is maintained at 1%. "
+            "Confidence bands are approximate and ignore uncertainty in the estimated FX-path weights."
+        )
+    else:
+        st.caption("FX path: future split FX moves enter the regression, isolating the initial split move conditional on later FX changes.")
+
+    large_appreciation_definition_chart(
+        lp_sample,
+        shock_settings["level_column"],
+        shock_settings["column"],
+        shock_settings["label"],
+        threshold,
+        "Quarterly" if horizon_unit == "quarters" else "Monthly",
+    )
+
+    regimes = ["Large appreciations", "All other FX moves"]
+    st.subheader("Response")
+    split_lp_chart(results, symmetric_results, response_settings["unit"], regimes, horizon_unit=horizon_unit)
+    display_columns = [
+        column
+        for column in ["regime", "horizon", "beta", "std_error", "ci_lower", "ci_upper", "nobs", "r_squared", "num_forward_shocks"]
+        if column in results.columns
+    ]
+    st.dataframe(results.loc[:, display_columns], use_container_width=True, hide_index=True)
+
+    if not fx_results.empty:
+        st.subheader("FX Reaction")
+        split_lp_chart(fx_results, symmetric_fx_results, "percent log points", regimes, horizon_unit=horizon_unit, reference_value=1.0)
+        with st.expander("FX reaction estimates", expanded=False):
+            fx_columns = [
+                column
+                for column in [
+                    "regime",
+                    "horizon",
+                    "beta",
+                    "std_error",
+                    "ci_lower",
+                    "ci_upper",
+                    "nobs",
+                    "r_squared",
+                    "maintenance_shock",
+                    "maintained_exchange_rate_path",
+                    "num_forward_shocks",
+                ]
+                if column in fx_results.columns
+            ]
+            st.dataframe(fx_results.loc[:, fx_columns], use_container_width=True, hide_index=True)
+    else:
+        st.info("No usable FX reaction estimates are available for the selected setup.")
+
+
 def render_monthly_labor_lp_page(monthly_data: pd.DataFrame) -> None:
     st.title("Unemployment LP")
     st.caption("Monthly labour-market responses to CHF appreciation shocks. Labour-market data are from the SNB data portal cube amarbma, sourced from SECO.")
     if monthly_data.empty:
         st.warning("No monthly labour-market data file found yet. Run `python scripts/fetch_data.py` from this project.")
         return
-    standard_tab, asymmetric_tab = st.tabs(["Standard IRFs", "Asymmetric IRFs"])
+    standard_tab, asymmetric_tab, large_appreciation_tab = st.tabs(["Standard IRFs", "Asymmetric IRFs", "Large Appreciations"])
     with standard_tab:
         render_monthly_labor_standard_section(monthly_data)
     with asymmetric_tab:
         render_monthly_labor_asymmetric_section(monthly_data)
+    with large_appreciation_tab:
+        render_large_appreciation_lp_section(
+            data=monthly_data,
+            response_options=MONTHLY_LABOR_RESPONSE_OPTIONS,
+            shock_options=MONTHLY_SHOCK_OPTIONS,
+            title="Large-Appreciation Monthly IRFs",
+            key_prefix="labor",
+            horizon_unit="months",
+            horizon_min=12,
+            horizon_max=60,
+            horizon_default=36,
+            horizon_step=6,
+            lag_max=24,
+            lag_default=6,
+            controls_enabled=False,
+        )
 
 
 def render_monthly_labor_standard_section(monthly_data: pd.DataFrame) -> None:
@@ -1460,11 +1930,29 @@ def render_data_audit_page(data: pd.DataFrame, sample: pd.DataFrame, metadata: p
 def render_lp_page(sample: pd.DataFrame) -> None:
     st.title("GDP LP")
     st.caption("First headline real GDP LP layer. Component LPs can be added once the headline mechanics look right.")
-    headline_lp, asymmetric_irfs, diagnostics = st.tabs(["Headline LP", "Asymmetric IRFs", "LP Sample"])
+    headline_lp, asymmetric_irfs, large_appreciations, diagnostics = st.tabs(
+        ["Headline LP", "Asymmetric IRFs", "Large Appreciations", "LP Sample"]
+    )
     with headline_lp:
         render_headline_lp_tab(sample)
     with asymmetric_irfs:
         render_asymmetric_irf_tab(sample)
+    with large_appreciations:
+        render_large_appreciation_lp_section(
+            data=sample,
+            response_options=LP_RESPONSE_OPTIONS,
+            shock_options=SHOCK_OPTIONS,
+            title="Large-Appreciation GDP IRFs",
+            key_prefix="gdp",
+            horizon_unit="quarters",
+            horizon_min=4,
+            horizon_max=16,
+            horizon_default=12,
+            horizon_step=1,
+            lag_max=8,
+            lag_default=4,
+            controls_enabled=True,
+        )
     with diagnostics:
         st.subheader("Available LP Inputs")
         lp_columns = [
